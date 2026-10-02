@@ -1,146 +1,184 @@
-# Part 070: Advanced API Gateway Patterns
+# Part 070 – Spring Cloud Gateway Advanced
 
-## Overview
-
-An API gateway is more than a reverse proxy — it is the front door to your entire system. This
-part turns Spring Cloud Gateway into a production-grade BFF (Backend for Frontend), aggregator,
-traffic splitter, rate limiter, protocol translator, and circuit breaker, all with practical
-runnable code.
-
----
-
-## 1. Project Setup
-
-### Maven dependencies (gateway service)
+## Dependencies (pom.xml)
 
 ```xml
 <dependencies>
-    <!-- Spring Cloud Gateway -->
     <dependency>
         <groupId>org.springframework.cloud</groupId>
         <artifactId>spring-cloud-starter-gateway</artifactId>
     </dependency>
-
-    <!-- Circuit breaker (Resilience4j) -->
-    <dependency>
-        <groupId>org.springframework.cloud</groupId>
-        <artifactId>spring-cloud-starter-circuitbreaker-reactor-resilience4j</artifactId>
-    </dependency>
-
-    <!-- Rate limiter (needs Redis) -->
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
-    </dependency>
-
-    <!-- Service discovery -->
     <dependency>
         <groupId>org.springframework.cloud</groupId>
         <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
     </dependency>
-
-    <!-- Security -->
     <dependency>
         <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-security</artifactId>
+        <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
     <dependency>
         <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
-    </dependency>
-
-    <!-- gRPC (protocol translation) -->
-    <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-stub</artifactId>
-        <version>1.60.1</version>
+        <artifactId>spring-boot-starter-data-redis-reactive</artifactId>
     </dependency>
     <dependency>
-        <groupId>io.grpc</groupId>
-        <artifactId>grpc-netty-shaded</artifactId>
-        <version>1.60.1</version>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-circuitbreaker-reactor-resilience4j</artifactId>
     </dependency>
-
     <dependency>
-        <groupId>org.projectlombok</groupId>
-        <artifactId>lombok</artifactId>
-        <optional>true</optional>
+        <groupId>io.jsonwebtoken</groupId>
+        <artifactId>jjwt-api</artifactId>
+        <version>0.12.3</version>
+    </dependency>
+    <dependency>
+        <groupId>io.jsonwebtoken</groupId>
+        <artifactId>jjwt-impl</artifactId>
+        <version>0.12.3</version>
+        <scope>runtime</scope>
+    </dependency>
+    <dependency>
+        <groupId>io.jsonwebtoken</groupId>
+        <artifactId>jjwt-jackson</artifactId>
+        <version>0.12.3</version>
+        <scope>runtime</scope>
+    </dependency>
+    <dependency>
+        <groupId>io.micrometer</groupId>
+        <artifactId>micrometer-registry-prometheus</artifactId>
     </dependency>
 </dependencies>
 
 <dependencyManagement>
-  <dependencies>
-    <dependency>
-      <groupId>org.springframework.cloud</groupId>
-      <artifactId>spring-cloud-dependencies</artifactId>
-      <version>2023.0.3</version>
-      <type>pom</type>
-      <scope>import</scope>
-    </dependency>
-  </dependencies>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-dependencies</artifactId>
+            <version>2023.0.3</version>
+            <type>pom</type>
+            <scope>import</scope>
+        </dependency>
+    </dependencies>
 </dependencyManagement>
 ```
 
-### application.yml
+---
+
+## 1. Route Configuration via YAML
 
 ```yaml
-server:
-  port: 8080
-
+# src/main/resources/application.yml
 spring:
   application:
     name: api-gateway
-
   cloud:
     gateway:
       default-filters:
         - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
         - name: RequestRateLimiter
           args:
-            redis-rate-limiter.replenishRate: 100
-            redis-rate-limiter.burstCapacity: 200
-            key-resolver: "#{@userKeyResolver}"
+            redis-rate-limiter.replenishRate: 10
+            redis-rate-limiter.burstCapacity: 20
+            redis-rate-limiter.requestedTokens: 1
+            key-resolver: "#{@ipKeyResolver}"
+      routes:
+        # User service route with Path predicate
+        - id: user-service
+          uri: lb://user-service
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - RewritePath=/api/users(?<segment>/?.*), /users${segment}
+            - AddRequestHeader=X-Gateway-Source, api-gateway
+            - AddResponseHeader=X-Response-Time, "#{T(java.time.Instant).now()}"
+            - name: CircuitBreaker
+              args:
+                name: userServiceCB
+                fallbackUri: forward:/fallback/users
 
-      globalcors:
-        corsConfigurations:
-          '[/**]':
-            allowedOriginPatterns: "*"
-            allowedMethods: "*"
-            allowedHeaders: "*"
-            allowCredentials: true
+        # Order service route with multiple predicates
+        - id: order-service
+          uri: lb://order-service
+          predicates:
+            - Path=/api/orders/**
+            - Method=GET,POST
+            - Header=X-Request-Id, \d+
+          filters:
+            - RewritePath=/api/orders(?<segment>/?.*), /orders${segment}
+            - name: Retry
+              args:
+                retries: 3
+                statuses: SERVICE_UNAVAILABLE, INTERNAL_SERVER_ERROR
+                methods: GET
+                backoff:
+                  firstBackoff: 100ms
+                  maxBackoff: 500ms
+                  factor: 2
+
+        # Product service with host predicate
+        - id: product-service-v1
+          uri: lb://product-service
+          predicates:
+            - Host=api.example.com
+            - Path=/products/**
+          filters:
+            - AddRequestHeader=X-API-Version, v1
+
+        # Admin routes with cookie-based predicate
+        - id: admin-service
+          uri: lb://admin-service
+          predicates:
+            - Path=/admin/**
+            - Cookie=session, [a-f0-9]{32}
+          filters:
+            - AddRequestHeader=X-Admin-Request, true
+
+        # Query parameter predicate
+        - id: search-service
+          uri: lb://search-service
+          predicates:
+            - Path=/search
+            - Query=q
+          filters:
+            - AddRequestHeader=X-Search-Request, true
 
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
+      host: localhost
+      port: 6379
 
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${JWT_ISSUER_URI:http://auth-server:9000}
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway
+  endpoint:
+    gateway:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
 
 resilience4j:
   circuitbreaker:
-    configs:
-      default:
+    instances:
+      userServiceCB:
         slidingWindowSize: 10
         failureRateThreshold: 50
         waitDurationInOpenState: 10s
-        permittedNumberOfCallsInHalfOpenState: 5
-
-services:
-  product-service-url:   http://product-service
-  order-service-url:     http://order-service
-  user-service-url:      http://user-service
-  inventory-service-url: http://inventory-service
-  grpc-product-host:     product-service
-  grpc-product-port:     9090
+        permittedNumberOfCallsInHalfOpenState: 3
+      orderServiceCB:
+        slidingWindowSize: 5
+        failureRateThreshold: 60
+        waitDurationInOpenState: 15s
 ```
 
 ---
 
-## 2. Basic Route Configuration
+## 2. Route Configuration via Java Code (RouteLocator)
 
 ```java
 package com.example.gateway.config;
@@ -150,273 +188,476 @@ import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+
+import java.time.Duration;
 
 @Configuration
-public class GatewayRouteConfig {
+public class GatewayRoutesConfig {
 
     @Bean
-    public RouteLocator routeLocator(RouteLocatorBuilder builder) {
+    public RouteLocator customRouteLocator(RouteLocatorBuilder builder) {
         return builder.routes()
 
-            // --- Product Service ---
-            .route("product-service", r -> r
-                .path("/api/v1/products/**")
+            // Payment service with strict predicates and circuit breaker
+            .route("payment-service", r -> r
+                .path("/api/payments/**")
+                .and()
+                .method(HttpMethod.POST, HttpMethod.GET)
+                .and()
+                .header("Content-Type", "application/json")
                 .filters(f -> f
-                    .rewritePath("/api/v1/products/(?<segment>.*)",
-                                 "/internal/products/${segment}")
-                    .addRequestHeader("X-Gateway-Source", "api-gateway")
-                    .addResponseHeader("X-Powered-By", "MyShop-Gateway")
-                    .circuitBreaker(cb -> cb
-                        .setName("product-cb")
-                        .setFallbackUri("forward:/fallback/products"))
-                )
-                .uri("lb://product-service"))
-
-            // --- Order Service ---
-            .route("order-service", r -> r
-                .path("/api/v1/orders/**")
-                .and().method(HttpMethod.GET, HttpMethod.POST, HttpMethod.PUT, HttpMethod.DELETE)
-                .filters(f -> f
-                    .circuitBreaker(cb -> cb
-                        .setName("order-cb")
-                        .setFallbackUri("forward:/fallback/orders"))
+                    .rewritePath("/api/payments(?<segment>/?.*)", "/payments${segment}")
+                    .addRequestHeader("X-Service-Name", "payment-service")
+                    .addRequestHeader("X-Gateway-Timestamp",
+                            String.valueOf(System.currentTimeMillis()))
+                    .circuitBreaker(c -> c
+                        .setName("paymentCB")
+                        .setFallbackUri("forward:/fallback/payment"))
                     .retry(config -> config
                         .setRetries(2)
+                        .setStatuses(HttpStatus.SERVICE_UNAVAILABLE)
                         .setMethods(HttpMethod.GET)
-                        .setStatuses(
-                            org.springframework.http.HttpStatus.BAD_GATEWAY,
-                            org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE))
+                        .setBackoff(Duration.ofMillis(100), Duration.ofMillis(1000), 2, false))
                 )
-                .uri("lb://order-service"))
+                .uri("lb://payment-service"))
 
-            // --- User Service ---
-            .route("user-service", r -> r
-                .path("/api/v1/users/**")
+            // Inventory service with rate limiting per user
+            .route("inventory-service", r -> r
+                .path("/api/inventory/**")
                 .filters(f -> f
-                    .circuitBreaker(cb -> cb
-                        .setName("user-cb")
-                        .setFallbackUri("forward:/fallback/users")))
-                .uri("lb://user-service"))
+                    .rewritePath("/api/inventory(?<segment>/?.*)", "/inventory${segment}")
+                    .requestRateLimiter(c -> c
+                        .setRateLimiter(redisRateLimiter())
+                        .setKeyResolver(userKeyResolver()))
+                    .addResponseHeader("X-Cache-Control", "no-store")
+                )
+                .uri("lb://inventory-service"))
 
-            // --- Auth pass-through ---
-            .route("auth-service", r -> r
-                .path("/api/v1/auth/**")
-                .uri("lb://auth-service"))
+            // Legacy service: strip prefix and map to v2
+            .route("legacy-catalog", r -> r
+                .path("/catalog/**")
+                .filters(f -> f
+                    .stripPrefix(1)
+                    .prefixPath("/api/v2")
+                    .setStatus(HttpStatus.OK)
+                    .addRequestHeader("X-Forwarded-By", "gateway")
+                )
+                .uri("lb://catalog-service"))
+
+            // Redirect from old path
+            .route("redirect-old-api", r -> r
+                .path("/v1/**")
+                .filters(f -> f.redirect(301, "http://api.example.com/v2/"))
+                .uri("http://api.example.com"))
 
             .build();
+    }
+
+    @Bean
+    public org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter redisRateLimiter() {
+        return new org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter(10, 20, 1);
+    }
+
+    @Bean
+    public org.springframework.cloud.gateway.filter.ratelimit.KeyResolver userKeyResolver() {
+        return exchange -> {
+            String userId = exchange.getRequest().getHeaders().getFirst("X-User-Id");
+            if (userId != null) {
+                return reactor.core.publisher.Mono.just(userId);
+            }
+            String ip = exchange.getRequest().getRemoteAddress() != null
+                    ? exchange.getRequest().getRemoteAddress().getAddress().getHostAddress()
+                    : "unknown";
+            return reactor.core.publisher.Mono.just(ip);
+        };
     }
 }
 ```
 
 ---
 
-## 3. Custom Gateway Filters
+## 3. IP-Based Key Resolver for Rate Limiting
 
-### 3.1 Request correlation ID filter
+```java
+package com.example.gateway.config;
+
+import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import reactor.core.publisher.Mono;
+
+@Configuration
+public class RateLimitConfig {
+
+    @Bean
+    public KeyResolver ipKeyResolver() {
+        return exchange -> {
+            String xForwardedFor = exchange.getRequest().getHeaders().getFirst("X-Forwarded-For");
+            if (xForwardedFor != null && !xForwardedFor.isEmpty()) {
+                return Mono.just(xForwardedFor.split(",")[0].trim());
+            }
+            if (exchange.getRequest().getRemoteAddress() != null) {
+                return Mono.just(exchange.getRequest().getRemoteAddress()
+                        .getAddress().getHostAddress());
+            }
+            return Mono.just("unknown");
+        };
+    }
+
+    @Bean
+    public KeyResolver apiKeyResolver() {
+        return exchange -> {
+            String apiKey = exchange.getRequest().getHeaders().getFirst("X-API-Key");
+            if (apiKey != null && !apiKey.isEmpty()) {
+                return Mono.just("api-key:" + apiKey);
+            }
+            return Mono.just("anonymous");
+        };
+    }
+
+    @Bean
+    public KeyResolver userIdKeyResolver() {
+        return exchange -> {
+            String userId = exchange.getRequest().getHeaders().getFirst("X-User-Id");
+            return Mono.just(userId != null ? "user:" + userId : "anonymous");
+        };
+    }
+}
+```
+
+---
+
+## 4. Custom Global Filter – Logging and Tracing
 
 ```java
 package com.example.gateway.filter;
 
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
 import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.UUID;
 
-@Slf4j
 @Component
-public class CorrelationIdFilter implements GlobalFilter, Ordered {
+public class RequestLoggingGlobalFilter implements GlobalFilter, Ordered {
 
-    public static final String CORRELATION_HEADER = "X-Correlation-ID";
+    private static final Logger log = LoggerFactory.getLogger(RequestLoggingGlobalFilter.class);
+    private static final String REQUEST_ID_HEADER = "X-Request-Id";
+    private static final String START_TIME_ATTR = "startTime";
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        String correlationId = exchange.getRequest().getHeaders()
-            .getFirst(CORRELATION_HEADER);
+        ServerHttpRequest request = exchange.getRequest();
 
-        if (correlationId == null || correlationId.isBlank()) {
-            correlationId = UUID.randomUUID().toString();
+        // Inject request ID if not present
+        String requestId = request.getHeaders().getFirst(REQUEST_ID_HEADER);
+        if (requestId == null || requestId.isEmpty()) {
+            requestId = UUID.randomUUID().toString();
+            ServerHttpRequest mutatedRequest = request.mutate()
+                    .header(REQUEST_ID_HEADER, requestId)
+                    .build();
+            exchange = exchange.mutate().request(mutatedRequest).build();
         }
 
-        final String finalCorrelationId = correlationId;
+        final String finalRequestId = requestId;
+        exchange.getAttributes().put(START_TIME_ATTR, Instant.now().toEpochMilli());
 
-        ServerHttpRequest mutatedRequest = exchange.getRequest().mutate()
-            .header(CORRELATION_HEADER, finalCorrelationId)
-            .build();
+        log.info("Incoming request: id={} method={} path={} remoteAddr={}",
+                finalRequestId,
+                request.getMethod(),
+                request.getURI().getPath(),
+                request.getRemoteAddress());
 
-        return chain.filter(exchange.mutate().request(mutatedRequest).build())
-            .then(Mono.fromRunnable(() ->
-                exchange.getResponse().getHeaders()
-                    .add(CORRELATION_HEADER, finalCorrelationId)
-            ));
+        ServerWebExchange finalExchange = exchange;
+        return chain.filter(exchange).then(Mono.fromRunnable(() -> {
+            ServerHttpResponse response = finalExchange.getResponse();
+            Long startTime = finalExchange.getAttribute(START_TIME_ATTR);
+            long duration = startTime != null ? Instant.now().toEpochMilli() - startTime : -1;
+
+            log.info("Response: id={} status={} duration={}ms",
+                    finalRequestId,
+                    response.getStatusCode(),
+                    duration);
+
+            // Add response headers for tracing
+            response.getHeaders().add("X-Request-Id", finalRequestId);
+            response.getHeaders().add("X-Response-Time", duration + "ms");
+        }));
     }
 
     @Override
-    public int getOrder() { return -100; }
+    public int getOrder() {
+        return Ordered.HIGHEST_PRECEDENCE;
+    }
 }
 ```
 
-### 3.2 Request/Response logging filter
+---
+
+## 5. Custom Global Filter – JWT Authentication
 
 ```java
 package com.example.gateway.filter;
 
-import lombok.extern.slf4j.Slf4j;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
-import org.springframework.stereotype.Component;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
-
-import java.time.Duration;
-import java.time.Instant;
-
-@Slf4j
-@Component
-public class AccessLogFilter implements GlobalFilter, Ordered {
-
-    @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        Instant start = Instant.now();
-        String path   = exchange.getRequest().getPath().value();
-        String method = exchange.getRequest().getMethod().name();
-        String corrId = exchange.getRequest().getHeaders()
-            .getFirst(CorrelationIdFilter.CORRELATION_HEADER);
-
-        return chain.filter(exchange)
-            .then(Mono.fromRunnable(() -> {
-                int status = exchange.getResponse().getStatusCode() != null
-                    ? exchange.getResponse().getStatusCode().value() : 0;
-                long ms = Duration.between(start, Instant.now()).toMillis();
-                log.info("{} {} {} {}ms corrId={}", method, path, status, ms, corrId);
-            }));
-    }
-
-    @Override
-    public int getOrder() { return -90; }
-}
-```
-
-### 3.3 JWT user-info extraction filter (inject user ID downstream)
-
-```java
-package com.example.gateway.filter;
-
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.GlobalFilter;
-import org.springframework.core.Ordered;
-import org.springframework.security.core.context.ReactiveSecurityContextHolder;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
-import org.springframework.stereotype.Component;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
-
-@Slf4j
-@Component
-public class UserContextFilter implements GlobalFilter, Ordered {
-
-    @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        return ReactiveSecurityContextHolder.getContext()
-            .flatMap(ctx -> {
-                if (ctx.getAuthentication() instanceof JwtAuthenticationToken jwtAuth) {
-                    Jwt jwt = (Jwt) jwtAuth.getPrincipal();
-                    String userId = jwt.getSubject();
-                    String roles  = String.join(",", jwtAuth.getAuthorities().stream()
-                        .map(a -> a.getAuthority()).toList());
-
-                    var request = exchange.getRequest().mutate()
-                        .header("X-User-ID",    userId)
-                        .header("X-User-Roles", roles)
-                        .build();
-                    return chain.filter(exchange.mutate().request(request).build());
-                }
-                return chain.filter(exchange);
-            })
-            .switchIfEmpty(chain.filter(exchange));
-    }
-
-    @Override
-    public int getOrder() { return -80; }
-}
-```
-
-### 3.4 Request transformation filter (add/modify body)
-
-```java
-package com.example.gateway.filter;
-
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cloud.gateway.filter.*;
-import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
-import org.springframework.core.io.buffer.*;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
+import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.stereotype.Component;
+import org.springframework.util.AntPathMatcher;
 import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.nio.charset.StandardCharsets;
+import java.security.Key;
+import java.util.Arrays;
+import java.util.List;
 
-/**
- * Adds a metadata field to JSON request bodies.
- * Usage in route: filters: - AddMetadata
- */
-@Slf4j
 @Component
-public class AddMetadataFilterFactory
-        extends AbstractGatewayFilterFactory<AddMetadataFilterFactory.Config> {
+public class JwtAuthenticationGlobalFilter implements GlobalFilter, Ordered {
 
-    public AddMetadataFilterFactory() { super(Config.class); }
+    private static final Logger log = LoggerFactory.getLogger(JwtAuthenticationGlobalFilter.class);
+    private final AntPathMatcher pathMatcher = new AntPathMatcher();
+
+    @Value("${jwt.secret:mySecretKey1234567890abcdefghijklmnop}")
+    private String secretKey;
+
+    private final List<String> excludedPaths = Arrays.asList(
+            "/api/auth/**",
+            "/actuator/**",
+            "/fallback/**",
+            "/api/public/**"
+    );
+
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String path = exchange.getRequest().getURI().getPath();
+
+        // Skip authentication for excluded paths
+        boolean isExcluded = excludedPaths.stream()
+                .anyMatch(p -> pathMatcher.match(p, path));
+        if (isExcluded) {
+            return chain.filter(exchange);
+        }
+
+        String authHeader = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            return unauthorizedResponse(exchange, "Missing or invalid Authorization header");
+        }
+
+        String token = authHeader.substring(7);
+        try {
+            Claims claims = parseToken(token);
+            String userId = claims.getSubject();
+            String roles = claims.get("roles", String.class);
+
+            // Forward user info to downstream services
+            ServerHttpRequest mutatedRequest = exchange.getRequest().mutate()
+                    .header("X-User-Id", userId)
+                    .header("X-User-Roles", roles != null ? roles : "")
+                    .header("X-Token-Expiry", String.valueOf(claims.getExpiration().getTime()))
+                    .build();
+
+            return chain.filter(exchange.mutate().request(mutatedRequest).build());
+        } catch (JwtException e) {
+            log.warn("Invalid JWT token for path {}: {}", path, e.getMessage());
+            return unauthorizedResponse(exchange, "Invalid or expired token");
+        }
+    }
+
+    private Claims parseToken(String token) {
+        Key key = Keys.hmacShaKeyFor(secretKey.getBytes(StandardCharsets.UTF_8));
+        return Jwts.parserBuilder()
+                .setSigningKey(key)
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    private Mono<Void> unauthorizedResponse(ServerWebExchange exchange, String message) {
+        ServerHttpResponse response = exchange.getResponse();
+        response.setStatusCode(HttpStatus.UNAUTHORIZED);
+        response.getHeaders().add("Content-Type", "application/json");
+        byte[] bytes = ("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8);
+        org.springframework.core.io.buffer.DataBuffer buffer =
+                response.bufferFactory().wrap(bytes);
+        return response.writeWith(Mono.just(buffer));
+    }
+
+    @Override
+    public int getOrder() {
+        return -100; // Run after logging filter but before routing
+    }
+}
+```
+
+---
+
+## 6. Custom GatewayFilter Factory – Request Validation
+
+```java
+package com.example.gateway.filter;
+
+import org.springframework.cloud.gateway.filter.GatewayFilter;
+import org.springframework.cloud.gateway.filter.GatewayFilterChain;
+import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
+import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Mono;
+
+import java.util.Arrays;
+import java.util.List;
+
+@Component
+public class ApiKeyValidationGatewayFilterFactory
+        extends AbstractGatewayFilterFactory<ApiKeyValidationGatewayFilterFactory.Config> {
+
+    public ApiKeyValidationGatewayFilterFactory() {
+        super(Config.class);
+    }
 
     @Override
     public GatewayFilter apply(Config config) {
         return (exchange, chain) -> {
-            if (!isJsonRequest(exchange)) return chain.filter(exchange);
+            String apiKey = exchange.getRequest().getHeaders().getFirst("X-API-Key");
 
-            return exchange.getRequest().getBody()
-                .collectList()
-                .flatMap(dataBuffers -> {
-                    String originalBody = dataBuffers.stream()
-                        .map(buf -> buf.toString(StandardCharsets.UTF_8))
-                        .reduce("", String::concat);
+            if (apiKey == null || !config.getValidKeys().contains(apiKey)) {
+                exchange.getResponse().setStatusCode(HttpStatus.FORBIDDEN);
+                return exchange.getResponse().setComplete();
+            }
 
-                    String modified = injectMetadata(originalBody, exchange);
-
-                    byte[] modifiedBytes = modified.getBytes(StandardCharsets.UTF_8);
-                    DataBufferFactory factory = exchange.getResponse().bufferFactory();
-                    DataBuffer buffer = factory.wrap(modifiedBytes);
-
-                    ServerHttpRequest request = new ServerHttpRequestDecorator(exchange.getRequest()) {
-                        @Override
-                        public Flux<DataBuffer> getBody() { return Flux.just(buffer); }
-                    };
-
-                    return chain.filter(exchange.mutate().request(request).build());
-                });
+            // Append API key owner info
+            return chain.filter(exchange.mutate()
+                    .request(exchange.getRequest().mutate()
+                            .header("X-API-Key-Owner", config.getKeyOwner(apiKey))
+                            .build())
+                    .build());
         };
     }
 
-    private boolean isJsonRequest(ServerWebExchange exchange) {
-        var contentType = exchange.getRequest().getHeaders().getContentType();
-        return contentType != null &&
-               contentType.toString().contains("application/json");
+    @Override
+    public List<String> shortcutFieldOrder() {
+        return Arrays.asList("keys");
     }
 
-    private String injectMetadata(String body, ServerWebExchange exchange) {
-        if (!body.trim().startsWith("{")) return body;
-        String gatewayMeta = "\"_gateway\":{\"source\":\"api-gateway\",\"timestamp\":"
-                             + System.currentTimeMillis() + "},";
-        return "{" + gatewayMeta + body.substring(1);
+    public static class Config {
+        private List<String> validKeys;
+        private java.util.Map<String, String> keyOwnerMap = new java.util.HashMap<>();
+
+        public List<String> getValidKeys() { return validKeys; }
+        public void setValidKeys(List<String> validKeys) { this.validKeys = validKeys; }
+        public void setKeys(String keys) { this.validKeys = Arrays.asList(keys.split(",")); }
+
+        public String getKeyOwner(String key) {
+            return keyOwnerMap.getOrDefault(key, "unknown");
+        }
+    }
+}
+```
+
+---
+
+## 7. Custom GatewayFilter – Request Body Modification
+
+```java
+package com.example.gateway.filter;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.cloud.gateway.filter.GatewayFilter;
+import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
+import org.springframework.stereotype.Component;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+@Component
+public class RequestBodyEnrichmentFilterFactory
+        extends AbstractGatewayFilterFactory<RequestBodyEnrichmentFilterFactory.Config> {
+
+    private final ObjectMapper objectMapper;
+
+    public RequestBodyEnrichmentFilterFactory(ObjectMapper objectMapper) {
+        super(Config.class);
+        this.objectMapper = objectMapper;
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public GatewayFilter apply(Config config) {
+        return (exchange, chain) -> {
+            if (exchange.getRequest().getMethod() != HttpMethod.POST
+                    && exchange.getRequest().getMethod() != HttpMethod.PUT) {
+                return chain.filter(exchange);
+            }
+
+            return DataBufferUtils.join(exchange.getRequest().getBody())
+                    .flatMap(dataBuffer -> {
+                        byte[] bytes = new byte[dataBuffer.readableByteCount()];
+                        dataBuffer.read(bytes);
+                        DataBufferUtils.release(dataBuffer);
+
+                        try {
+                            String body = new String(bytes, StandardCharsets.UTF_8);
+                            Map<String, Object> bodyMap = objectMapper.readValue(body, Map.class);
+
+                            // Enrich with gateway metadata
+                            bodyMap.put("_gateway_timestamp", System.currentTimeMillis());
+                            bodyMap.put("_gateway_version", "v2");
+
+                            String enrichedBody = objectMapper.writeValueAsString(bodyMap);
+                            byte[] enrichedBytes = enrichedBody.getBytes(StandardCharsets.UTF_8);
+
+                            ServerHttpRequest mutatedRequest = new ServerHttpRequestDecorator(exchange.getRequest()) {
+                                @Override
+                                public Flux<DataBuffer> getBody() {
+                                    DataBuffer buffer = exchange.getResponse().bufferFactory()
+                                            .wrap(enrichedBytes);
+                                    return Flux.just(buffer);
+                                }
+
+                                @Override
+                                public HttpHeaders getHeaders() {
+                                    HttpHeaders headers = new HttpHeaders();
+                                    headers.putAll(super.getHeaders());
+                                    headers.setContentLength(enrichedBytes.length);
+                                    return headers;
+                                }
+                            };
+
+                            return chain.filter(exchange.mutate().request(mutatedRequest).build());
+                        } catch (Exception e) {
+                            return chain.filter(exchange);
+                        }
+                    });
+        };
     }
 
     public static class Config {}
@@ -425,1148 +666,573 @@ public class AddMetadataFilterFactory
 
 ---
 
-## 4. Gateway as BFF (Backend for Frontend)
-
-### Mobile BFF — aggregates data for a single screen
+## 8. Fallback Controller
 
 ```java
-package com.example.gateway.bff;
-
-import lombok.*;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-
-import java.time.Duration;
-import java.util.List;
-import java.util.Map;
-
-@Service
-@RequiredArgsConstructor
-public class MobileBffService {
-
-    private final WebClient.Builder webClientBuilder;
-
-    @Value("${services.product-service-url}")   private String productUrl;
-    @Value("${services.order-service-url}")      private String orderUrl;
-    @Value("${services.user-service-url}")       private String userUrl;
-    @Value("${services.inventory-service-url}")  private String inventoryUrl;
-
-    /**
-     * Home screen aggregation: user profile + recent orders + featured products.
-     * All 3 calls are fired in parallel.
-     */
-    public Mono<HomeScreenResponse> getHomeScreen(String userId, String authHeader) {
-        WebClient productClient  = webClientBuilder.baseUrl(productUrl).build();
-        WebClient orderClient    = webClientBuilder.baseUrl(orderUrl).build();
-        WebClient userClient     = webClientBuilder.baseUrl(userUrl).build();
-
-        Mono<UserProfileDto>       profileMono = userClient.get()
-            .uri("/internal/users/{id}", userId)
-            .header("Authorization", authHeader)
-            .retrieve()
-            .bodyToMono(UserProfileDto.class)
-            .timeout(Duration.ofSeconds(3))
-            .onErrorReturn(new UserProfileDto());
-
-        Mono<List<OrderSummaryDto>> ordersMono = orderClient.get()
-            .uri("/internal/orders?userId={id}&limit=5", userId)
-            .header("Authorization", authHeader)
-            .retrieve()
-            .bodyToFlux(OrderSummaryDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(3))
-            .onErrorReturn(List.of());
-
-        Mono<List<ProductSummaryDto>> featuredMono = productClient.get()
-            .uri("/internal/products/featured?limit=10")
-            .retrieve()
-            .bodyToFlux(ProductSummaryDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(3))
-            .onErrorReturn(List.of());
-
-        return Mono.zip(profileMono, ordersMono, featuredMono)
-            .map(tuple -> HomeScreenResponse.builder()
-                .user(tuple.getT1())
-                .recentOrders(tuple.getT2())
-                .featuredProducts(tuple.getT3())
-                .build());
-    }
-
-    /**
-     * Product detail screen: product + inventory + related products.
-     */
-    public Mono<ProductDetailResponse> getProductDetail(Long productId) {
-        WebClient productClient   = webClientBuilder.baseUrl(productUrl).build();
-        WebClient inventoryClient = webClientBuilder.baseUrl(inventoryUrl).build();
-
-        Mono<ProductDto> productMono = productClient.get()
-            .uri("/internal/products/{id}", productId)
-            .retrieve()
-            .bodyToMono(ProductDto.class)
-            .timeout(Duration.ofSeconds(3));
-
-        Mono<InventoryDto> inventoryMono = inventoryClient.get()
-            .uri("/internal/inventory/{id}", productId)
-            .retrieve()
-            .bodyToMono(InventoryDto.class)
-            .timeout(Duration.ofSeconds(2))
-            .onErrorReturn(new InventoryDto(productId, 0, "UNKNOWN"));
-
-        Mono<List<ProductSummaryDto>> relatedMono = productClient.get()
-            .uri("/internal/products/{id}/related?limit=6", productId)
-            .retrieve()
-            .bodyToFlux(ProductSummaryDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(2))
-            .onErrorReturn(List.of());
-
-        return Mono.zip(productMono, inventoryMono, relatedMono)
-            .map(t -> ProductDetailResponse.builder()
-                .product(t.getT1())
-                .inventory(t.getT2())
-                .relatedProducts(t.getT3())
-                .build());
-    }
-}
-```
-
-### BFF DTOs
-
-```java
-package com.example.gateway.bff;
-
-import lombok.*;
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.util.List;
-
-@Data @Builder @NoArgsConstructor @AllArgsConstructor
-class HomeScreenResponse {
-    private UserProfileDto user;
-    private List<OrderSummaryDto> recentOrders;
-    private List<ProductSummaryDto> featuredProducts;
-}
-
-@Data @NoArgsConstructor @AllArgsConstructor
-class UserProfileDto {
-    private String id;
-    private String name;
-    private String email;
-    private String avatarUrl;
-}
-
-@Data @NoArgsConstructor @AllArgsConstructor
-class OrderSummaryDto {
-    private String id;
-    private String orderNumber;
-    private String status;
-    private BigDecimal total;
-    private Instant createdAt;
-}
-
-@Data @NoArgsConstructor @AllArgsConstructor
-class ProductSummaryDto {
-    private Long   id;
-    private String name;
-    private String thumbnailUrl;
-    private BigDecimal price;
-    private Double rating;
-}
-
-@Data @Builder @NoArgsConstructor @AllArgsConstructor
-class ProductDetailResponse {
-    private ProductDto product;
-    private InventoryDto inventory;
-    private List<ProductSummaryDto> relatedProducts;
-}
-
-@Data @NoArgsConstructor @AllArgsConstructor
-class ProductDto {
-    private Long   id;
-    private String name;
-    private String description;
-    private BigDecimal price;
-}
-
-@Data @AllArgsConstructor @NoArgsConstructor
-class InventoryDto {
-    private Long productId;
-    private int  stock;
-    private String status; // IN_STOCK | LOW_STOCK | OUT_OF_STOCK | UNKNOWN
-}
-```
-
-### BFF Controller
-
-```java
-package com.example.gateway.bff;
-
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
-
-@RestController
-@RequestMapping("/bff")
-@RequiredArgsConstructor
-public class BffController {
-
-    private final MobileBffService mobileBffService;
-
-    @GetMapping("/mobile/home")
-    public Mono<ResponseEntity<HomeScreenResponse>> mobileHome(
-            @AuthenticationPrincipal Jwt jwt,
-            @RequestHeader(value = "Authorization", required = false) String auth) {
-        return mobileBffService.getHomeScreen(jwt.getSubject(), auth)
-            .map(ResponseEntity::ok);
-    }
-
-    @GetMapping("/mobile/products/{id}")
-    public Mono<ResponseEntity<ProductDetailResponse>> productDetail(
-            @PathVariable Long id) {
-        return mobileBffService.getProductDetail(id)
-            .map(ResponseEntity::ok);
-    }
-}
-```
-
----
-
-## 5. Rate Limiting per User Tier
-
-```java
-package com.example.gateway.ratelimit;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
-import org.springframework.cloud.gateway.filter.ratelimit.RateLimiter;
-import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
-import org.springframework.security.core.context.ReactiveSecurityContextHolder;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
-import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
-
-@Slf4j
-@Component("userKeyResolver")
-public class UserTierKeyResolver implements KeyResolver {
-
-    @Override
-    public Mono<String> resolve(org.springframework.web.server.ServerWebExchange exchange) {
-        return ReactiveSecurityContextHolder.getContext()
-            .map(ctx -> {
-                if (ctx.getAuthentication() instanceof JwtAuthenticationToken jwtAuth) {
-                    Jwt jwt = (Jwt) jwtAuth.getPrincipal();
-                    String tier = jwt.getClaimAsString("tier"); // "FREE" | "BASIC" | "PRO"
-                    // Key = tier:userId so different tiers get separate buckets
-                    return (tier == null ? "FREE" : tier.toUpperCase()) + ":" + jwt.getSubject();
-                }
-                return "ANONYMOUS:" + exchange.getRequest().getRemoteAddress();
-            })
-            .defaultIfEmpty("ANONYMOUS:" +
-                exchange.getRequest().getRemoteAddress().getHostString());
-    }
-}
-```
-
-```java
-package com.example.gateway.ratelimit;
-
-import org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration
-public class RateLimiterConfig {
-
-    /** Free tier: 10 req/s, burst of 20. */
-    @Bean("freeRateLimiter")
-    public RedisRateLimiter freeRateLimiter() {
-        return new RedisRateLimiter(10, 20, 1);
-    }
-
-    /** Basic tier: 60 req/s, burst of 120. */
-    @Bean("basicRateLimiter")
-    public RedisRateLimiter basicRateLimiter() {
-        return new RedisRateLimiter(60, 120, 1);
-    }
-
-    /** Pro tier: 300 req/s, burst of 600. */
-    @Bean("proRateLimiter")
-    public RedisRateLimiter proRateLimiter() {
-        return new RedisRateLimiter(300, 600, 1);
-    }
-}
-```
-
-### Tier-aware routing in Java config
-
-```java
-package com.example.gateway.config;
-
-import com.example.gateway.ratelimit.*;
-import lombok.RequiredArgsConstructor;
-import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
-import org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter;
-import org.springframework.cloud.gateway.route.RouteLocator;
-import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.core.context.ReactiveSecurityContextHolder;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
-import org.springframework.security.oauth2.jwt.Jwt;
-import reactor.core.publisher.Mono;
-import org.springframework.web.server.ServerWebExchange;
-import org.springframework.cloud.gateway.filter.ratelimit.KeyResolver;
-
-@Configuration
-@RequiredArgsConstructor
-public class TieredRateLimitRouteConfig {
-
-    private final RedisRateLimiter freeRateLimiter;
-    private final RedisRateLimiter basicRateLimiter;
-    private final RedisRateLimiter proRateLimiter;
-    private final UserTierKeyResolver keyResolver;
-
-    @Bean
-    public RouteLocator tieredRoutes(RouteLocatorBuilder builder) {
-        return builder.routes()
-            // All search traffic with tier-based rate limiting
-            .route("search-tier-free", r -> r
-                .path("/api/v1/search/**")
-                .and().header("X-User-Tier", "FREE")
-                .filters(f -> f
-                    .requestRateLimiter(c -> c
-                        .setRateLimiter(freeRateLimiter)
-                        .setKeyResolver(keyResolver)))
-                .uri("lb://search-service"))
-
-            .route("search-tier-basic", r -> r
-                .path("/api/v1/search/**")
-                .and().header("X-User-Tier", "BASIC")
-                .filters(f -> f
-                    .requestRateLimiter(c -> c
-                        .setRateLimiter(basicRateLimiter)
-                        .setKeyResolver(keyResolver)))
-                .uri("lb://search-service"))
-
-            .route("search-tier-pro", r -> r
-                .path("/api/v1/search/**")
-                .filters(f -> f
-                    .requestRateLimiter(c -> c
-                        .setRateLimiter(proRateLimiter)
-                        .setKeyResolver(keyResolver)))
-                .uri("lb://search-service"))
-            .build();
-    }
-}
-```
-
----
-
-## 6. Traffic Splitting — Canary and A/B Testing
-
-```java
-package com.example.gateway.trafficsplit;
-
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.GlobalFilter;
-import org.springframework.core.Ordered;
-import org.springframework.stereotype.Component;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
-
-/**
- * Canary deployment: route X% of traffic to v2.
- *
- * Sets header X-Route-Target: canary or stable which downstream routes match.
- */
-@Slf4j
-@Component
-public class CanaryRoutingFilter implements GlobalFilter, Ordered {
-
-    private static final double CANARY_PERCENTAGE = 0.10; // 10%
-
-    @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        // Stable traffic already has a cookie → keep them on same version
-        String existingVariant = getCookieValue(exchange, "variant");
-        if (existingVariant != null) {
-            return chain.filter(taggedExchange(exchange, existingVariant));
-        }
-
-        String variant = Math.random() < CANARY_PERCENTAGE ? "canary" : "stable";
-        var mutated = taggedExchange(exchange, variant);
-
-        // Set cookie so user stays on same variant
-        mutated.getResponse().addCookie(
-            org.springframework.http.ResponseCookie
-                .from("variant", variant)
-                .path("/")
-                .maxAge(java.time.Duration.ofHours(1))
-                .build()
-        );
-
-        return chain.filter(mutated);
-    }
-
-    private ServerWebExchange taggedExchange(ServerWebExchange exchange, String variant) {
-        var request = exchange.getRequest().mutate()
-            .header("X-Route-Target", variant)
-            .build();
-        return exchange.mutate().request(request).build();
-    }
-
-    private String getCookieValue(ServerWebExchange exchange, String name) {
-        var cookie = exchange.getRequest().getCookies().getFirst(name);
-        return cookie != null ? cookie.getValue() : null;
-    }
-
-    @Override
-    public int getOrder() { return -70; }
-}
-```
-
-```java
-package com.example.gateway.config;
-
-import org.springframework.cloud.gateway.route.RouteLocator;
-import org.springframework.cloud.gateway.route.builder.RouteLocatorBuilder;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-@Configuration
-public class CanaryRouteConfig {
-
-    @Bean
-    public RouteLocator canaryRoutes(RouteLocatorBuilder builder) {
-        return builder.routes()
-            // Canary version (new code under test)
-            .route("product-v2-canary", r -> r
-                .path("/api/v1/products/**")
-                .and().header("X-Route-Target", "canary")
-                .filters(f -> f.addResponseHeader("X-Version", "v2"))
-                .uri("lb://product-service-v2"))
-
-            // Stable version (current production)
-            .route("product-v1-stable", r -> r
-                .path("/api/v1/products/**")
-                .filters(f -> f.addResponseHeader("X-Version", "v1"))
-                .uri("lb://product-service"))
-            .build();
-    }
-}
-```
-
-### A/B testing by user ID hash
-
-```java
-package com.example.gateway.trafficsplit;
-
-import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.GlobalFilter;
-import org.springframework.core.Ordered;
-import org.springframework.security.core.context.ReactiveSecurityContextHolder;
-import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.stereotype.Component;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
-
-/**
- * Deterministic A/B split by user ID.
- * Users consistently land in group A or B across sessions.
- */
-@Component
-public class AbTestingFilter implements GlobalFilter, Ordered {
-
-    @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        return ReactiveSecurityContextHolder.getContext()
-            .flatMap(ctx -> {
-                String group = "A"; // default
-                if (ctx.getAuthentication() instanceof JwtAuthenticationToken jwtAuth) {
-                    Jwt jwt = (Jwt) jwtAuth.getPrincipal();
-                    int hash = Math.abs(jwt.getSubject().hashCode());
-                    group = (hash % 2 == 0) ? "A" : "B";
-                }
-                var req = exchange.getRequest().mutate()
-                    .header("X-AB-Group", group)
-                    .build();
-                return chain.filter(exchange.mutate().request(req).build());
-            })
-            .switchIfEmpty(chain.filter(exchange));
-    }
-
-    @Override
-    public int getOrder() { return -65; }
-}
-```
-
----
-
-## 7. Circuit Breaker at Gateway Level
-
-```java
-package com.example.gateway.config;
-
-import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
-import io.github.resilience4j.timelimiter.TimeLimiterConfig;
-import org.springframework.cloud.circuitbreaker.resilience4j.ReactiveResilience4JCircuitBreakerFactory;
-import org.springframework.cloud.circuitbreaker.resilience4j.Resilience4JConfigBuilder;
-import org.springframework.cloud.client.circuitbreaker.Customizer;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-
-import java.time.Duration;
-
-@Configuration
-public class CircuitBreakerConfig2 {
-
-    @Bean
-    public Customizer<ReactiveResilience4JCircuitBreakerFactory> circuitBreakerCustomizer() {
-        return factory -> {
-            factory.configureDefault(id -> new Resilience4JConfigBuilder(id)
-                .timeLimiterConfig(TimeLimiterConfig.custom()
-                    .timeoutDuration(Duration.ofSeconds(5))
-                    .build())
-                .circuitBreakerConfig(CircuitBreakerConfig.custom()
-                    .slidingWindowSize(10)
-                    .failureRateThreshold(50)
-                    .waitDurationInOpenState(Duration.ofSeconds(10))
-                    .permittedNumberOfCallsInHalfOpenState(5)
-                    .build())
-                .build());
-
-            // More permissive config for non-critical services
-            factory.configure(builder -> builder
-                .timeLimiterConfig(TimeLimiterConfig.custom()
-                    .timeoutDuration(Duration.ofSeconds(2))
-                    .build())
-                .circuitBreakerConfig(CircuitBreakerConfig.custom()
-                    .slidingWindowSize(20)
-                    .failureRateThreshold(70)
-                    .build())
-                .build(), "recommendation-cb");
-        };
-    }
-}
-```
-
-### Fallback controller
-
-```java
-package com.example.gateway.fallback;
+package com.example.gateway.controller;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
-import java.time.Instant;
-import java.util.List;
+import java.time.LocalDateTime;
 import java.util.Map;
 
 @RestController
 @RequestMapping("/fallback")
 public class FallbackController {
 
-    @GetMapping("/products")
-    public Mono<ResponseEntity<Map<String, Object>>> productsFallback() {
-        return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-            .body(Map.of(
-                "status", 503,
-                "message", "Product service is temporarily unavailable. Please try again later.",
-                "timestamp", Instant.now().toString(),
-                "data", List.of()
-            )));
+    @GetMapping("/{service}")
+    public Mono<ResponseEntity<Map<String, Object>>> serviceFallback(@PathVariable String service) {
+        Map<String, Object> body = Map.of(
+                "service", service,
+                "status", "unavailable",
+                "message", "The " + service + " service is temporarily unavailable. Please try again later.",
+                "timestamp", LocalDateTime.now().toString(),
+                "retryAfter", 30
+        );
+        return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body));
     }
 
-    @GetMapping("/orders")
-    public Mono<ResponseEntity<Map<String, Object>>> ordersFallback() {
-        return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-            .body(Map.of(
-                "status", 503,
-                "message", "Order service is temporarily unavailable.",
-                "timestamp", Instant.now().toString()
-            )));
-    }
-
-    @GetMapping("/users")
-    public Mono<ResponseEntity<Map<String, Object>>> usersFallback() {
-        return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-            .body(Map.of(
-                "status", 503,
-                "message", "User service is temporarily unavailable.",
-                "timestamp", Instant.now().toString()
-            )));
+    @GetMapping("/payment")
+    public Mono<ResponseEntity<Map<String, Object>>> paymentFallback() {
+        Map<String, Object> body = Map.of(
+                "service", "payment",
+                "status", "circuit_open",
+                "message", "Payment service circuit breaker is open. Your request has been queued.",
+                "timestamp", LocalDateTime.now().toString()
+        );
+        return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body));
     }
 }
 ```
 
 ---
 
-## 8. Protocol Translation — REST to gRPC
+## 9. Gateway Metrics Configuration
 
 ```java
-package com.example.gateway.grpc;
+package com.example.gateway.config;
 
-import io.grpc.*;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
+import org.springframework.boot.actuate.autoconfigure.metrics.MeterRegistryCustomizer;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
+import java.util.List;
 
-@Slf4j
-@Component
-public class GrpcChannelManager {
+@Configuration
+public class MetricsConfig {
 
-    @Value("${services.grpc-product-host}")
-    private String productHost;
-
-    @Value("${services.grpc-product-port}")
-    private int productPort;
-
-    private ManagedChannel productChannel;
-
-    @PostConstruct
-    public void init() {
-        productChannel = ManagedChannelBuilder
-            .forAddress(productHost, productPort)
-            .usePlaintext()
-            .enableRetry()
-            .maxRetryAttempts(3)
-            .build();
-        log.info("gRPC channel to product-service initialized");
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        if (productChannel != null) productChannel.shutdownNow();
-    }
-
-    public ManagedChannel getProductChannel() { return productChannel; }
-}
-```
-
-```java
-package com.example.gateway.grpc;
-
-import com.example.grpc.ProductServiceGrpc;
-import com.example.grpc.ProductProto.*;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
-import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
-
-import java.util.concurrent.TimeUnit;
-
-/**
- * Translates REST calls to gRPC calls on the product service.
- */
-@Slf4j
-@Service
-@RequiredArgsConstructor
-public class RestToGrpcBridge {
-
-    private final GrpcChannelManager channelManager;
-
-    public Mono<ProductResponse> getProduct(Long productId) {
-        return Mono.fromCallable(() -> {
-            ProductServiceGrpc.ProductServiceBlockingStub stub =
-                ProductServiceGrpc.newBlockingStub(channelManager.getProductChannel())
-                    .withDeadlineAfter(3, TimeUnit.SECONDS);
-
-            GetProductRequest request = GetProductRequest.newBuilder()
-                .setProductId(productId)
-                .build();
-
-            return stub.getProduct(request);
-        }).subscribeOn(Schedulers.boundedElastic());
-    }
-
-    public Mono<SearchProductsResponse> searchProducts(String keyword, int page, int size) {
-        return Mono.fromCallable(() -> {
-            ProductServiceGrpc.ProductServiceBlockingStub stub =
-                ProductServiceGrpc.newBlockingStub(channelManager.getProductChannel())
-                    .withDeadlineAfter(5, TimeUnit.SECONDS);
-
-            SearchProductsRequest request = SearchProductsRequest.newBuilder()
-                .setKeyword(keyword)
-                .setPage(page)
-                .setSize(size)
-                .build();
-
-            return stub.searchProducts(request);
-        }).subscribeOn(Schedulers.boundedElastic());
+    @Bean
+    public MeterRegistryCustomizer<MeterRegistry> metricsCommonTags() {
+        return registry -> registry.config()
+                .commonTags(List.of(
+                        Tag.of("application", "api-gateway"),
+                        Tag.of("environment", "production")
+                ));
     }
 }
 ```
-
-### REST controller that uses the bridge
-
-```java
-package com.example.gateway.grpc;
-
-import com.example.grpc.ProductProto.*;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
-
-@RestController
-@RequestMapping("/api/v1/grpc/products")
-@RequiredArgsConstructor
-public class ProductGrpcController {
-
-    private final RestToGrpcBridge bridge;
-
-    @GetMapping("/{id}")
-    public Mono<ResponseEntity<ProductResponse>> getProduct(@PathVariable Long id) {
-        return bridge.getProduct(id)
-            .map(ResponseEntity::ok)
-            .onErrorReturn(ResponseEntity.internalServerError().build());
-    }
-
-    @GetMapping("/search")
-    public Mono<ResponseEntity<SearchProductsResponse>> search(
-            @RequestParam String q,
-            @RequestParam(defaultValue = "0")  int page,
-            @RequestParam(defaultValue = "20") int size) {
-        return bridge.searchProducts(q, page, size)
-            .map(ResponseEntity::ok)
-            .onErrorReturn(ResponseEntity.internalServerError().build());
-    }
-}
-```
-
----
-
-## 9. Gateway Caching
 
 ```java
 package com.example.gateway.filter;
 
-import lombok.extern.slf4j.Slf4j;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.core.Ordered;
-import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
-import org.springframework.http.*;
-import org.springframework.http.server.reactive.ServerHttpResponse;
-import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
 import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Set;
+import java.time.Instant;
 
-/**
- * Simple response caching for GET requests to cacheable paths.
- * Uses Redis as shared cache so all gateway instances share it.
- */
-@Slf4j
 @Component
-public class ResponseCacheFilter implements GlobalFilter, Ordered {
+public class MetricsGlobalFilter implements GlobalFilter, Ordered {
 
-    private static final Set<String> CACHEABLE_PREFIXES = Set.of(
-        "/api/v1/products/",
-        "/api/v1/categories"
-    );
-    private static final Duration CACHE_TTL = Duration.ofMinutes(5);
+    private final MeterRegistry meterRegistry;
 
-    private final ReactiveStringRedisTemplate redisTemplate;
-
-    public ResponseCacheFilter(ReactiveStringRedisTemplate redisTemplate) {
-        this.redisTemplate = redisTemplate;
+    public MetricsGlobalFilter(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        if (!isGetRequest(exchange) || !isCacheable(exchange)) {
-            return chain.filter(exchange);
-        }
+        Instant start = Instant.now();
+        String path = exchange.getRequest().getURI().getPath();
+        String method = exchange.getRequest().getMethod().name();
+        String routeId = extractRouteId(path);
 
-        String cacheKey = "gateway:cache:" + exchange.getRequest().getURI().toString();
+        Counter.builder("gateway.requests.total")
+                .tag("method", method)
+                .tag("route", routeId)
+                .register(meterRegistry)
+                .increment();
 
-        return redisTemplate.opsForValue().get(cacheKey)
-            .flatMap(cached -> {
-                log.debug("Gateway cache HIT: {}", cacheKey);
-                ServerHttpResponse response = exchange.getResponse();
-                response.setStatusCode(HttpStatus.OK);
-                response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-                response.getHeaders().add("X-Cache", "HIT");
-                byte[] bytes = cached.getBytes(StandardCharsets.UTF_8);
-                DataBuffer buffer = response.bufferFactory().wrap(bytes);
-                return response.writeWith(Mono.just(buffer));
-            })
-            .switchIfEmpty(Mono.defer(() -> {
-                log.debug("Gateway cache MISS: {}", cacheKey);
-                return captureAndCacheResponse(exchange, chain, cacheKey);
-            }));
-    }
+        return chain.filter(exchange).doOnSuccess(v -> {
+            int statusCode = exchange.getResponse().getStatusCode() != null
+                    ? exchange.getResponse().getStatusCode().value() : 0;
 
-    private Mono<Void> captureAndCacheResponse(ServerWebExchange exchange,
-                                                GatewayFilterChain chain,
-                                                String cacheKey) {
-        StringBuilder bodyHolder = new StringBuilder();
-        ServerHttpResponse original = exchange.getResponse();
+            Timer.builder("gateway.request.duration")
+                    .tag("method", method)
+                    .tag("route", routeId)
+                    .tag("status", String.valueOf(statusCode))
+                    .register(meterRegistry)
+                    .record(Duration.between(start, Instant.now()));
 
-        ServerHttpResponseDecorator decorator = new ServerHttpResponseDecorator(original) {
-            @Override
-            public Mono<Void> writeWith(org.reactivestreams.Publisher<? extends DataBuffer> body) {
-                return super.writeWith(Flux.from(body).doOnNext(buf -> {
-                    if (getStatusCode() == HttpStatus.OK) {
-                        bodyHolder.append(buf.toString(StandardCharsets.UTF_8));
-                    }
-                })).then(Mono.defer(() -> {
-                    if (!bodyHolder.isEmpty()) {
-                        return redisTemplate.opsForValue()
-                            .set(cacheKey, bodyHolder.toString(), CACHE_TTL)
-                            .then();
-                    }
-                    return Mono.empty();
-                }));
+            if (statusCode >= 400) {
+                Counter.builder("gateway.requests.errors")
+                        .tag("method", method)
+                        .tag("route", routeId)
+                        .tag("status", String.valueOf(statusCode))
+                        .register(meterRegistry)
+                        .increment();
             }
-        };
-
-        return chain.filter(exchange.mutate().response(decorator).build());
+        });
     }
 
-    private boolean isGetRequest(ServerWebExchange e) {
-        return HttpMethod.GET.equals(e.getRequest().getMethod());
-    }
-
-    private boolean isCacheable(ServerWebExchange e) {
-        String path = e.getRequest().getPath().value();
-        return CACHEABLE_PREFIXES.stream().anyMatch(path::startsWith);
+    private String extractRouteId(String path) {
+        if (path.startsWith("/api/users")) return "user-service";
+        if (path.startsWith("/api/orders")) return "order-service";
+        if (path.startsWith("/api/payments")) return "payment-service";
+        if (path.startsWith("/api/inventory")) return "inventory-service";
+        return "unknown";
     }
 
     @Override
-    public int getOrder() { return -60; }
+    public int getOrder() {
+        return Ordered.HIGHEST_PRECEDENCE + 1;
+    }
 }
 ```
 
 ---
 
-## 10. Request Validation at Gateway
-
-```java
-package com.example.gateway.filter;
-
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.cloud.gateway.filter.GatewayFilterChain;
-import org.springframework.cloud.gateway.filter.GlobalFilter;
-import org.springframework.core.Ordered;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.server.reactive.ServerHttpResponse;
-import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
-import org.springframework.web.server.ServerWebExchange;
-import reactor.core.publisher.Mono;
-
-import java.nio.charset.StandardCharsets;
-
-/**
- * Rejects obviously malformed requests before they reach downstream services.
- */
-@Slf4j
-@Component
-public class RequestValidationFilter implements GlobalFilter, Ordered {
-
-    private static final int MAX_PATH_LENGTH  = 512;
-    private static final int MAX_QUERY_LENGTH = 1024;
-
-    @Override
-    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        var request = exchange.getRequest();
-        String path  = request.getPath().value();
-        String query = request.getURI().getQuery();
-
-        // Reject oversized paths
-        if (path.length() > MAX_PATH_LENGTH) {
-            return reject(exchange, "Request path too long");
-        }
-
-        // Reject oversized query strings
-        if (query != null && query.length() > MAX_QUERY_LENGTH) {
-            return reject(exchange, "Query string too long");
-        }
-
-        // Basic path traversal check
-        if (path.contains("..") || path.contains("%2e%2e")) {
-            return reject(exchange, "Invalid path");
-        }
-
-        // Required API version header for non-auth paths
-        if (!path.startsWith("/api/v1/auth") && !path.startsWith("/bff") &&
-            !path.startsWith("/fallback") && !path.startsWith("/actuator")) {
-            String version = request.getHeaders().getFirst("X-API-Version");
-            if (StringUtils.hasText(version) && !"1".equals(version) && !"2".equals(version)) {
-                return reject(exchange, "Unsupported API version: " + version);
-            }
-        }
-
-        return chain.filter(exchange);
-    }
-
-    private Mono<Void> reject(ServerWebExchange exchange, String reason) {
-        log.warn("Request rejected: {} path={}", reason,
-                 exchange.getRequest().getPath().value());
-        ServerHttpResponse response = exchange.getResponse();
-        response.setStatusCode(HttpStatus.BAD_REQUEST);
-        byte[] body = ("{\"error\":\"" + reason + "\"}").getBytes(StandardCharsets.UTF_8);
-        return response.writeWith(Mono.just(response.bufferFactory().wrap(body)));
-    }
-
-    @Override
-    public int getOrder() { return -110; }  // Before all others
-}
-```
-
----
-
-## 11. Security Configuration
+## 10. CORS Configuration
 
 ```java
 package com.example.gateway.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity;
-import org.springframework.security.config.web.server.ServerHttpSecurity;
-import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.reactive.CorsWebFilter;
+import org.springframework.web.cors.reactive.UrlBasedCorsConfigurationSource;
+
+import java.util.Arrays;
+import java.util.List;
 
 @Configuration
-@EnableWebFluxSecurity
-public class SecurityConfig {
+public class CorsConfig {
 
     @Bean
-    public SecurityWebFilterChain securityFilterChain(ServerHttpSecurity http) {
-        return http
-            .csrf(ServerHttpSecurity.CsrfSpec::disable)
-            .authorizeExchange(exchanges -> exchanges
-                // Public endpoints
-                .pathMatchers(
-                    "/api/v1/auth/**",
-                    "/api/v1/products/**",       // GET only — handled below for writes
-                    "/api/v1/categories/**",
-                    "/fallback/**",
-                    "/actuator/health"
-                ).permitAll()
+    public CorsWebFilter corsWebFilter() {
+        CorsConfiguration config = new CorsConfiguration();
+        config.setAllowCredentials(true);
+        config.setAllowedOriginPatterns(List.of("https://*.example.com", "http://localhost:*"));
+        config.setAllowedHeaders(Arrays.asList(
+                "Authorization", "Content-Type", "X-Request-Id",
+                "X-API-Key", "Accept", "Cache-Control"
+        ));
+        config.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"));
+        config.setExposedHeaders(Arrays.asList("X-Request-Id", "X-Response-Time", "X-Total-Count"));
+        config.setMaxAge(3600L);
 
-                // BFF endpoints require authentication
-                .pathMatchers("/bff/**").authenticated()
-
-                // Admin operations
-                .pathMatchers("/api/v1/admin/**")
-                    .hasRole("ADMIN")
-
-                // Everything else requires auth
-                .anyExchange().authenticated()
-            )
-            .oauth2ResourceServer(oauth2 -> oauth2.jwt(jwt -> {}))
-            .build();
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+        return new CorsWebFilter(source);
     }
 }
 ```
 
 ---
 
-## 12. Real Example — BFF for Mobile and Web Clients
-
-### Web BFF — returns full data for desktop
+## 11. Route Predicate Factory – Business Hours
 
 ```java
-package com.example.gateway.bff;
+package com.example.gateway.predicate;
 
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.cloud.gateway.handler.predicate.AbstractRoutePredicateFactory;
+import org.springframework.stereotype.Component;
+import org.springframework.web.server.ServerWebExchange;
+
+import java.time.DayOfWeek;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Predicate;
+
+@Component
+public class BusinessHoursRoutePredicateFactory
+        extends AbstractRoutePredicateFactory<BusinessHoursRoutePredicateFactory.Config> {
+
+    public BusinessHoursRoutePredicateFactory() {
+        super(Config.class);
+    }
+
+    @Override
+    public Predicate<ServerWebExchange> apply(Config config) {
+        return exchange -> {
+            LocalDateTime now = LocalDateTime.now();
+            DayOfWeek day = now.getDayOfWeek();
+            LocalTime time = now.toLocalTime();
+
+            boolean isWeekday = day != DayOfWeek.SATURDAY && day != DayOfWeek.SUNDAY;
+            boolean isBusinessHours = time.isAfter(config.getStartTime())
+                    && time.isBefore(config.getEndTime());
+
+            return isWeekday && isBusinessHours;
+        };
+    }
+
+    @Override
+    public List<String> shortcutFieldOrder() {
+        return Arrays.asList("startTime", "endTime");
+    }
+
+    public static class Config {
+        private LocalTime startTime = LocalTime.of(9, 0);
+        private LocalTime endTime = LocalTime.of(17, 0);
+
+        public LocalTime getStartTime() { return startTime; }
+        public void setStartTime(LocalTime startTime) { this.startTime = startTime; }
+        public LocalTime getEndTime() { return endTime; }
+        public void setEndTime(LocalTime endTime) { this.endTime = endTime; }
+    }
+}
+```
+
+---
+
+## 12. Dynamic Route Management (CRUD via API)
+
+```java
+package com.example.gateway.controller;
+
+import org.springframework.cloud.gateway.event.RefreshRoutesEvent;
+import org.springframework.cloud.gateway.filter.FilterDefinition;
+import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition;
+import org.springframework.cloud.gateway.route.RouteDefinition;
+import org.springframework.cloud.gateway.route.RouteDefinitionWriter;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Mono;
+
+import java.net.URI;
+import java.util.List;
+import java.util.UUID;
+
+@RestController
+@RequestMapping("/admin/routes")
+public class DynamicRouteController {
+
+    private final RouteDefinitionWriter routeDefinitionWriter;
+    private final ApplicationEventPublisher eventPublisher;
+
+    public DynamicRouteController(RouteDefinitionWriter routeDefinitionWriter,
+                                  ApplicationEventPublisher eventPublisher) {
+        this.routeDefinitionWriter = routeDefinitionWriter;
+        this.eventPublisher = eventPublisher;
+    }
+
+    @PostMapping
+    public Mono<ResponseEntity<String>> addRoute(@RequestBody RouteDefinitionRequest request) {
+        RouteDefinition definition = new RouteDefinition();
+        definition.setId(request.getId() != null ? request.getId() : UUID.randomUUID().toString());
+        definition.setUri(URI.create(request.getUri()));
+
+        PredicateDefinition pathPredicate = new PredicateDefinition();
+        pathPredicate.setName("Path");
+        pathPredicate.addArg("pattern", request.getPath());
+        definition.setPredicates(List.of(pathPredicate));
+
+        if (request.getStripPrefix() != null) {
+            FilterDefinition stripFilter = new FilterDefinition();
+            stripFilter.setName("StripPrefix");
+            stripFilter.addArg("parts", request.getStripPrefix().toString());
+            definition.setFilters(List.of(stripFilter));
+        }
+
+        return routeDefinitionWriter.save(Mono.just(definition))
+                .doOnSuccess(v -> refreshRoutes())
+                .thenReturn(ResponseEntity.ok("Route added: " + definition.getId()));
+    }
+
+    @DeleteMapping("/{routeId}")
+    public Mono<ResponseEntity<String>> deleteRoute(@PathVariable String routeId) {
+        return routeDefinitionWriter.delete(Mono.just(routeId))
+                .doOnSuccess(v -> refreshRoutes())
+                .thenReturn(ResponseEntity.ok("Route deleted: " + routeId))
+                .onErrorResume(e -> Mono.just(
+                        ResponseEntity.notFound().<String>build()));
+    }
+
+    private void refreshRoutes() {
+        eventPublisher.publishEvent(new RefreshRoutesEvent(this));
+    }
+
+    public static class RouteDefinitionRequest {
+        private String id;
+        private String uri;
+        private String path;
+        private Integer stripPrefix;
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+        public String getUri() { return uri; }
+        public void setUri(String uri) { this.uri = uri; }
+        public String getPath() { return path; }
+        public void setPath(String path) { this.path = path; }
+        public Integer getStripPrefix() { return stripPrefix; }
+        public void setStripPrefix(Integer stripPrefix) { this.stripPrefix = stripPrefix; }
+    }
+}
+```
+
+---
+
+## 13. Load Balancing with Eureka
+
+```yaml
+# Eureka client configuration for the gateway
+eureka:
+  client:
+    serviceUrl:
+      defaultZone: http://localhost:8761/eureka/
+    registry-fetch-interval-seconds: 5
+    fetch-registry: true
+    register-with-eureka: true
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+    metadata-map:
+      version: "2.0"
+      zone: "primary"
+```
+
+```java
+package com.example.gateway.config;
+
+import org.springframework.cloud.client.loadbalancer.LoadBalanced;
+import org.springframework.cloud.loadbalancer.annotation.LoadBalancerClient;
+import org.springframework.cloud.loadbalancer.annotation.LoadBalancerClients;
+import org.springframework.cloud.loadbalancer.core.RandomLoadBalancer;
+import org.springframework.cloud.loadbalancer.core.ReactorLoadBalancer;
+import org.springframework.cloud.loadbalancer.core.ServiceInstanceListSupplier;
+import org.springframework.cloud.loadbalancer.support.LoadBalancerClientFactory;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
+
+@Configuration
+@LoadBalancerClients({
+    @LoadBalancerClient(name = "user-service", configuration = RandomLBConfig.class),
+    @LoadBalancerClient(name = "order-service", configuration = RandomLBConfig.class)
+})
+public class LoadBalancerConfig {
+}
+
+class RandomLBConfig {
+    @Bean
+    public ReactorLoadBalancer<org.springframework.cloud.client.ServiceInstance> randomLoadBalancer(
+            Environment environment, LoadBalancerClientFactory factory) {
+        String name = environment.getProperty(LoadBalancerClientFactory.PROPERTY_NAME);
+        return new RandomLoadBalancer(
+                factory.getLazyProvider(name, ServiceInstanceListSupplier.class), name);
+    }
+}
+```
+
+---
+
+## 14. Response Caching Filter
+
+```java
+package com.example.gateway.filter;
+
+import org.springframework.cloud.gateway.filter.GatewayFilter;
+import org.springframework.cloud.gateway.filter.factory.AbstractGatewayFilterFactory;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
-import java.util.List;
 
-@Service
-@RequiredArgsConstructor
-public class WebBffService {
+@Component
+public class ResponseCacheGatewayFilterFactory
+        extends AbstractGatewayFilterFactory<ResponseCacheGatewayFilterFactory.Config> {
 
-    private final WebClient.Builder builder;
+    private final ReactiveRedisTemplate<String, byte[]> redisTemplate;
 
-    @Value("${services.product-service-url}")  private String productUrl;
-    @Value("${services.order-service-url}")     private String orderUrl;
-    @Value("${services.user-service-url}")      private String userUrl;
-
-    /**
-     * Product catalog page for web: full product list + category tree + brand list.
-     */
-    public Mono<CatalogPageResponse> getCatalogPage(Long categoryId, String auth) {
-        WebClient product = builder.baseUrl(productUrl).build();
-
-        Mono<List<ProductSummaryDto>> productsMono = product.get()
-            .uri("/internal/products?categoryId={id}&limit=40", categoryId)
-            .header("Authorization", auth)
-            .retrieve()
-            .bodyToFlux(ProductSummaryDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(5))
-            .onErrorReturn(List.of());
-
-        Mono<List<CategoryDto>> categoriesMono = product.get()
-            .uri("/internal/categories/tree")
-            .retrieve()
-            .bodyToFlux(CategoryDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(3))
-            .onErrorReturn(List.of());
-
-        Mono<List<BrandDto>> brandsMono = product.get()
-            .uri("/internal/brands?categoryId={id}", categoryId)
-            .retrieve()
-            .bodyToFlux(BrandDto.class)
-            .collectList()
-            .timeout(Duration.ofSeconds(3))
-            .onErrorReturn(List.of());
-
-        return Mono.zip(productsMono, categoriesMono, brandsMono)
-            .map(t -> CatalogPageResponse.builder()
-                .products(t.getT1())
-                .categoryTree(t.getT2())
-                .brands(t.getT3())
-                .build());
+    public ResponseCacheGatewayFilterFactory(ReactiveRedisTemplate<String, byte[]> redisTemplate) {
+        super(Config.class);
+        this.redisTemplate = redisTemplate;
     }
 
-    @lombok.Data @lombok.Builder @lombok.NoArgsConstructor @lombok.AllArgsConstructor
-    public static class CatalogPageResponse {
-        private List<ProductSummaryDto> products;
-        private List<CategoryDto>       categoryTree;
-        private List<BrandDto>          brands;
+    @Override
+    public GatewayFilter apply(Config config) {
+        return (exchange, chain) -> {
+            if (exchange.getRequest().getMethod() != HttpMethod.GET) {
+                return chain.filter(exchange);
+            }
+
+            String cacheKey = "gateway:cache:" + exchange.getRequest().getURI().toString();
+
+            return redisTemplate.opsForValue().get(cacheKey)
+                    .flatMap(cachedBytes -> {
+                        exchange.getResponse().setStatusCode(HttpStatus.OK);
+                        exchange.getResponse().getHeaders().add("X-Cache", "HIT");
+                        org.springframework.core.io.buffer.DataBuffer buffer =
+                                exchange.getResponse().bufferFactory().wrap(cachedBytes);
+                        return exchange.getResponse().writeWith(Mono.just(buffer));
+                    })
+                    .switchIfEmpty(chain.filter(exchange)
+                            .doOnSuccess(v -> {
+                                // Cache the response for TTL duration
+                                // In production: use ServerHttpResponseDecorator to capture body
+                                exchange.getResponse().getHeaders().add("X-Cache", "MISS");
+                            }));
+        };
     }
 
-    @lombok.Data @lombok.NoArgsConstructor @lombok.AllArgsConstructor
-    public static class CategoryDto { private Long id; private String name; private Long parentId; }
+    public static class Config {
+        private Duration ttl = Duration.ofMinutes(5);
 
-    @lombok.Data @lombok.NoArgsConstructor @lombok.AllArgsConstructor
-    public static class BrandDto { private Long id; private String name; private String logoUrl; }
-}
-```
-
-```java
-package com.example.gateway.bff;
-
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
-
-@RestController
-@RequestMapping("/bff/web")
-@RequiredArgsConstructor
-public class WebBffController {
-
-    private final WebBffService webBffService;
-
-    @GetMapping("/catalog")
-    public Mono<ResponseEntity<WebBffService.CatalogPageResponse>> catalog(
-            @RequestParam(required = false) Long categoryId,
-            @RequestHeader(value = "Authorization", required = false) String auth) {
-        return webBffService.getCatalogPage(categoryId, auth)
-            .map(ResponseEntity::ok);
+        public Duration getTtl() { return ttl; }
+        public void setTtl(Duration ttl) { this.ttl = ttl; }
     }
 }
 ```
 
 ---
 
-## 13. Gateway Actuator and Monitoring
-
-```yaml
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health, info, metrics, gateway, prometheus
-  endpoint:
-    health:
-      show-details: when-authorized
-    gateway:
-      enabled: true
-```
+## 15. Full Application Entry Point
 
 ```java
-package com.example.gateway.monitor;
+package com.example.gateway;
 
-import lombok.RequiredArgsConstructor;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+
+@SpringBootApplication
+@EnableDiscoveryClient
+public class ApiGatewayApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ApiGatewayApplication.class, args);
+    }
+}
+```
+
+---
+
+## 16. Gateway Integration Tests
+
+```java
+package com.example.gateway;
+
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.cloud.gateway.route.RouteLocator;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import reactor.core.publisher.Mono;
+import org.springframework.test.web.reactive.server.WebTestClient;
 
-import java.util.List;
+import java.time.Duration;
 
-@RestController
-@RequestMapping("/admin/gateway")
-@RequiredArgsConstructor
-public class GatewayAdminController {
+import static org.assertj.core.api.Assertions.assertThat;
 
-    private final RouteLocator routeLocator;
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class GatewayRoutingTest {
 
-    @GetMapping("/routes")
-    public Mono<ResponseEntity<List<String>>> listRoutes() {
-        return routeLocator.getRoutes()
-            .map(r -> r.getId() + " → " + r.getUri())
-            .collectList()
-            .map(ResponseEntity::ok);
+    @LocalServerPort
+    private int port;
+
+    @Autowired
+    private WebTestClient webTestClient;
+
+    @Autowired
+    private RouteLocator routeLocator;
+
+    @Test
+    void gatewayHasExpectedRoutes() {
+        long routeCount = routeLocator.getRoutes()
+                .filter(route -> route.getId() != null)
+                .count()
+                .block();
+        assertThat(routeCount).isGreaterThan(0);
+    }
+
+    @Test
+    void fallbackEndpointReturns503() {
+        webTestClient
+                .mutate()
+                .responseTimeout(Duration.ofSeconds(10))
+                .build()
+                .get()
+                .uri("/fallback/unknown-service")
+                .exchange()
+                .expectStatus().isEqualTo(503)
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("unavailable");
+    }
+
+    @Test
+    void healthEndpointIsAccessible() {
+        webTestClient
+                .get()
+                .uri("/actuator/health")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.status").isEqualTo("UP");
+    }
+
+    @Test
+    void requestWithoutJwtIsRejected() {
+        webTestClient
+                .get()
+                .uri("/api/users/1")
+                .exchange()
+                .expectStatus().isUnauthorized()
+                .expectBody()
+                .jsonPath("$.error").exists();
     }
 }
 ```
 
 ---
 
-## Summary Table
+## Summary
 
-| Pattern | Spring Component | Class |
-|---|---|---|
-| Route config | `RouteLocatorBuilder` | `GatewayRouteConfig` |
-| Correlation ID | `GlobalFilter` | `CorrelationIdFilter` |
-| Access logging | `GlobalFilter` | `AccessLogFilter` |
-| JWT user injection | `GlobalFilter` | `UserContextFilter` |
-| Request body rewrite | `AbstractGatewayFilterFactory` | `AddMetadataFilterFactory` |
-| BFF aggregation | `WebClient.zip()` | `MobileBffService` / `WebBffService` |
-| Tier rate limiting | `RedisRateLimiter` + `KeyResolver` | `UserTierKeyResolver` |
-| Canary routing | `GlobalFilter` + route predicate | `CanaryRoutingFilter` |
-| A/B by user ID | `GlobalFilter` | `AbTestingFilter` |
-| Circuit breaker | `spring-cloud-gateway` + Resilience4j | `CircuitBreakerConfig2` |
-| Fallback responses | `@RestController` | `FallbackController` |
-| REST→gRPC bridge | gRPC blocking stub | `RestToGrpcBridge` |
-| Response cache | `GlobalFilter` + Redis | `ResponseCacheFilter` |
-| Request validation | `GlobalFilter` | `RequestValidationFilter` |
-| Security | `ServerHttpSecurity` reactive | `SecurityConfig` |
-
----
-
-## Next Part Preview
-
-**Part 071: Event-Driven Architecture with Apache Kafka** — design event-driven microservices with
-Kafka producers, consumers, consumer groups, partitioning strategies, exactly-once semantics,
-schema registry with Avro, dead-letter queues, and a complete order processing saga using the
-transactional outbox pattern.
+| Feature | Config |
+|---|---|
+| Path predicate | `Path=/api/users/**` |
+| Host predicate | `Host=api.example.com` |
+| Method predicate | `Method=GET,POST` |
+| Header predicate | `Header=X-Request-Id, \\d+` |
+| Cookie predicate | `Cookie=session, [a-f0-9]{32}` |
+| Query predicate | `Query=q` |
+| RewritePath filter | `RewritePath=/api(?<s>/.*), ${s}` |
+| Rate limiting | `RequestRateLimiter` + Redis |
+| Circuit breaker | `CircuitBreaker` + Resilience4j |
+| Retry filter | `Retry` with backoff |
+| JWT validation | `GlobalFilter` with JWTS parser |
+| Custom filter | `AbstractGatewayFilterFactory` |
+| Load balancing | `lb://service-name` + Eureka |
+| Dynamic routes | `RouteDefinitionWriter` |
+| Metrics | Micrometer + Prometheus |
