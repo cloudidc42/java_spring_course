@@ -1138,45 +1138,7 @@ mvn install -pl shop-service,shop-web -am -DskipTests=false
 
 ---
 
-## 14. Spring Boot Multi-Module Application Config
-
-```yaml
-# shop-web/src/main/resources/application.yml
-spring:
-  application:
-    name: shop-web
-  datasource:
-    url: jdbc:postgresql://localhost:5432/shopdb
-    username: ${DB_USER:shop}
-    password: ${DB_PASS:shop}
-  jpa:
-    hibernate:
-      ddl-auto: validate
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-        format_sql: true
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
-  cache:
-    type: caffeine
-    caffeine:
-      spec: maximumSize=1000,expireAfterWrite=5m
-
-server:
-  port: 8080
-
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,info,metrics,prometheus
-```
-
----
-
-## 15. Packaging and Deployment
+## 14. Packaging and Deployment
 
 ```dockerfile
 # shop-web/Dockerfile — multi-stage to minimise image size
@@ -1230,55 +1192,6 @@ services:
 
 volumes:
   pgdata:
-```
-
----
-
-## 16. GitHub Actions — Build Changed Modules Only
-
-```yaml
-# .github/workflows/ci.yml
-name: CI
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0            # full history for change detection
-
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: 'maven'
-
-      - name: Detect changed modules
-        id: changes
-        run: |
-          CHANGED=$(git diff --name-only origin/main...HEAD | \
-            grep -oP '^shop-[a-z]+' | sort -u | tr '\n' ',')
-          echo "modules=${CHANGED%,}" >> $GITHUB_OUTPUT
-
-      - name: Build and test
-        run: |
-          if [ -n "${{ steps.changes.outputs.modules }}" ]; then
-            ./mvnw install -pl "${{ steps.changes.outputs.modules }}" -am
-          else
-            ./mvnw install
-          fi
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: '**/target/site/jacoco/jacoco.xml'
 ```
 
 ---
