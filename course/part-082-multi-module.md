@@ -1094,7 +1094,7 @@ dependencies {
 ```
 
 ```groovy
-// In the consumer (shop-common/build.gradle), use the substituted dependency:
+// shop-common/build.gradle — use the substituted dependency:
 dependencies {
     implementation 'com.example:shop-shared-lib'  // resolved from includeBuild
 }
@@ -1171,25 +1171,17 @@ version: "3.9"
 services:
   db:
     image: postgres:16-alpine
-    environment:
-      POSTGRES_DB:       shopdb
-      POSTGRES_USER:     shop
-      POSTGRES_PASSWORD: shop
+    environment: { POSTGRES_DB: shopdb, POSTGRES_USER: shop, POSTGRES_PASSWORD: shop }
     ports: ["5432:5432"]
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
+    volumes: [pgdata:/var/lib/postgresql/data]
   shop-web:
-    build:
-      context: .
-      dockerfile: shop-web/Dockerfile
+    build: { context: ., dockerfile: shop-web/Dockerfile }
     depends_on: [db]
     environment:
       DB_USER: shop
       DB_PASS: shop
       SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/shopdb
     ports: ["8080:8080"]
-
 volumes:
   pgdata:
 ```
