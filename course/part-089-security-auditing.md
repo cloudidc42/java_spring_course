@@ -1176,51 +1176,6 @@ class DocumentServiceSecurityTest {
 
 ---
 
-## 14. Flyway Migration for Audit Schema
-
-```sql
--- src/main/resources/db/migration/V3__audit_tables.sql
-
-CREATE TABLE audit_logs (
-    id           BIGSERIAL    PRIMARY KEY,
-    entity_type  VARCHAR(100) NOT NULL,
-    entity_id    BIGINT,
-    action       VARCHAR(50)  NOT NULL,
-    username     VARCHAR(100) NOT NULL,
-    ip_address   VARCHAR(45),
-    old_value    TEXT,
-    new_value    TEXT,
-    occurred_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_audit_entity ON audit_logs (entity_type, entity_id);
-CREATE INDEX idx_audit_user   ON audit_logs (username);
-CREATE INDEX idx_audit_time   ON audit_logs (occurred_at DESC);
-
-CREATE TABLE acl_entries (
-    id          BIGSERIAL    PRIMARY KEY,
-    principal   VARCHAR(200) NOT NULL,
-    object_type VARCHAR(100) NOT NULL,
-    object_id   BIGINT       NOT NULL,
-    permission  VARCHAR(50)  NOT NULL,
-    UNIQUE (principal, object_type, object_id, permission)
-);
-
-CREATE INDEX idx_acl_lookup ON acl_entries (object_type, object_id, permission);
-
-CREATE TABLE erasure_requests (
-    id                BIGSERIAL    PRIMARY KEY,
-    subject_username  VARCHAR(100) NOT NULL,
-    requested_by      VARCHAR(100) NOT NULL,
-    reason            TEXT,
-    status            VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
-    requested_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    completed_at      TIMESTAMPTZ
-);
-```
-
----
-
 ## Summary
 
 | Feature | Mechanism |

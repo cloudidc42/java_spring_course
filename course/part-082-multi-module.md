@@ -1108,31 +1108,19 @@ Gradle tracks task inputs and outputs by hash so it skips tasks whose inputs hav
 For CI pipelines you can combine this with `--configuration-cache` and `--build-cache`.
 
 ```bash
-# Build only the changed module and its dependents
+# Gradle: build only the changed module and its dependents
 ./gradlew :shop-web:bootJar --configuration-cache --build-cache
-
-# Run tests only in affected modules (determined by --parallel dependency graph)
 ./gradlew test --parallel --continue
+./gradlew :shop-service:test --dry-run   # dry run: show tasks without running
 
-# Show what tasks will execute without running them
-./gradlew :shop-service:test --dry-run
-
-# Enable the Gradle build cache (local and remote)
-# gradle.properties
+# gradle.properties — enable caching and parallel execution
 org.gradle.caching=true
 org.gradle.configureondemand=true
 org.gradle.parallel=true
-org.gradle.daemon=true
 org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
-```
 
-For Maven, use the `--also-make` / `--projects` flags:
-
-```bash
-# Build only shop-web and everything it depends on
+# Maven: build only shop-web and everything it depends on
 mvn install -pl shop-web -am
-
-# Skip tests in unchanged modules
 mvn install -pl shop-service,shop-web -am -DskipTests=false
 ```
 

@@ -284,27 +284,16 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.time.Instant;
 
-@Entity
-@Table(name = "refresh_tokens")
+@Entity @Table(name = "refresh_tokens")
 @Getter @Setter @Builder @NoArgsConstructor @AllArgsConstructor
 public class RefreshToken {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(nullable = false, unique = true, length = 512)
-    private String token;
-
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;
+    @Column(nullable = false, unique = true, length = 512) private String token;
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "user_id")
-    private User user;
-
-    @Column(nullable = false)
-    private Instant expiresAt;
-
+    @JoinColumn(name = "user_id") private User user;
+    @Column(nullable = false) private Instant expiresAt;
     private boolean revoked = false;
-    private String  replacedByToken;     // token rotation chain
+    private String  replacedByToken;   // token rotation chain
     private String  ipAddress;
     private String  userAgent;
 }
@@ -652,31 +641,16 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.time.Instant;
 
-@Entity
-@Table(name = "outbox_events")
+@Entity @Table(name = "outbox_events")
 @Getter @Setter @Builder @NoArgsConstructor @AllArgsConstructor
 public class OutboxEvent {
-
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
-
-    @Column(nullable = false)
-    private String aggregateType;       // "Order"
-
-    @Column(nullable = false)
-    private Long aggregateId;
-
-    @Column(nullable = false)
-    private String eventType;           // "ORDER_CREATED"
-
-    @Column(nullable = false, columnDefinition = "TEXT")
-    private String payload;             // JSON
-
-    @Column(nullable = false)
-    private Instant createdAt;
-
-    private Instant publishedAt;        // null = pending
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY) private Long id;
+    @Column(nullable = false) private String aggregateType;  // "Order"
+    @Column(nullable = false) private Long   aggregateId;
+    @Column(nullable = false) private String eventType;      // "ORDER_CREATED"
+    @Column(nullable = false, columnDefinition = "TEXT") private String payload;
+    @Column(nullable = false) private Instant createdAt;
+    private Instant publishedAt;   // null = pending
 }
 ```
 
@@ -957,37 +931,25 @@ public class OrderEventConsumer {
 ```yaml
 # docker/docker-compose.yml
 version: "3.9"
-
 services:
-  # ---------- Infrastructure ----------
   postgres-auth:
     image: postgres:16-alpine
     environment: { POSTGRES_DB: authdb, POSTGRES_USER: auth, POSTGRES_PASSWORD: auth }
     ports: ["5433:5432"]
     volumes: [auth-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auth"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U auth"], interval: 5s, retries: 10 }
   postgres-orders:
     image: postgres:16-alpine
     environment: { POSTGRES_DB: ordersdb, POSTGRES_USER: orders, POSTGRES_PASSWORD: orders }
     ports: ["5434:5432"]
     volumes: [orders-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U orders"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U orders"], interval: 5s, retries: 10 }
   postgres-payments:
     image: postgres:16-alpine
     environment: { POSTGRES_DB: paymentsdb, POSTGRES_USER: payments, POSTGRES_PASSWORD: payments }
     ports: ["5435:5432"]
     volumes: [payments-data:/var/lib/postgresql/data]
-
+    healthcheck: { test: ["CMD-SHELL","pg_isready -U payments"], interval: 5s, retries: 10 }
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
     environment:
@@ -997,11 +959,9 @@ services:
     ports: ["9200:9200"]
     volumes: [es-data:/usr/share/elasticsearch/data]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qv red"]
+      test: ["CMD-SHELL","curl -sf http://localhost:9200/_cluster/health | grep -qv red"]
       interval: 10s
-      timeout: 10s
       retries: 10
-
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     environment:
@@ -1015,17 +975,13 @@ services:
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     ports: ["9092:9092"]
     healthcheck:
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      test: ["CMD-SHELL","kafka-broker-api-versions --bootstrap-server localhost:9092"]
       interval: 10s
-      timeout: 10s
       retries: 10
-
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
     command: redis-server --save 60 1
-
-  # ---------- Application Services ----------
   auth-service:
     build: { context: .., dockerfile: auth-service/Dockerfile }
     ports: ["8081:8081"]
@@ -1037,16 +993,12 @@ services:
       SPRING_DATASOURCE_PASSWORD: auth
       JWT_SECRET: ${JWT_SECRET:-changeme_at_least_32_chars_long!!}
       SERVER_PORT: 8081
-
   product-service:
     build: { context: .., dockerfile: product-service/Dockerfile }
     ports: ["8082:8082"]
     depends_on:
       elasticsearch: { condition: service_healthy }
-    environment:
-      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
-      SERVER_PORT: 8082
-
+    environment: { SPRING_ELASTICSEARCH_URIS: "http://elasticsearch:9200", SERVER_PORT: 8082 }
   order-service:
     build: { context: .., dockerfile: order-service/Dockerfile }
     ports: ["8083:8083"]
@@ -1059,7 +1011,6 @@ services:
       SPRING_DATASOURCE_PASSWORD: orders
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SERVER_PORT: 8083
-
   payment-service:
     build: { context: .., dockerfile: payment-service/Dockerfile }
     ports: ["8084:8084"]
@@ -1072,44 +1023,24 @@ services:
       SPRING_DATASOURCE_PASSWORD: payments
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SERVER_PORT: 8084
-
   notification-service:
     build: { context: .., dockerfile: notification-service/Dockerfile }
     ports: ["8085:8085"]
-    depends_on:
-      kafka: { condition: service_healthy }
-    environment:
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MAIL_HOST: ${MAIL_HOST:-mailhog}
-      SERVER_PORT: 8085
-
-  # ---------- Observability ----------
+    depends_on: { kafka: { condition: service_healthy } }
+    environment: { SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092, SERVER_PORT: 8085 }
   prometheus:
     image: prom/prometheus:v2.52.0
     ports: ["9090:9090"]
-    volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    command: ["--config.file=/etc/prometheus/prometheus.yml",
-              "--storage.tsdb.retention.time=15d"]
-
+    volumes: ["./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    command: ["--config.file=/etc/prometheus/prometheus.yml","--storage.tsdb.retention.time=15d"]
   grafana:
     image: grafana/grafana:10.4.2
     ports: ["3000:3000"]
-    environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-
+    environment: { GF_SECURITY_ADMIN_PASSWORD: admin, GF_USERS_ALLOW_SIGN_UP: "false" }
+    volumes: ["grafana-data:/var/lib/grafana"]
   zipkin:
     image: openzipkin/zipkin:3.3
     ports: ["9411:9411"]
-
-  mailhog:
-    image: mailhog/mailhog
-    ports: ["1025:1025", "8025:8025"]
-
 volumes:
   auth-data:
   orders-data:
@@ -1120,51 +1051,26 @@ volumes:
 
 ---
 
-## 11. Prometheus Configuration
+## 11. Prometheus and Actuator Configuration
 
 ```yaml
 # docker/prometheus/prometheus.yml
 global:
-  scrape_interval:     15s
-  evaluation_interval: 15s
-
+  scrape_interval: 15s
 scrape_configs:
-  - job_name: 'auth-service'
+  - job_name: 'spring-services'
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['auth-service:8081']
-
-  - job_name: 'product-service'
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['product-service:8082']
-
-  - job_name: 'order-service'
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['order-service:8083']
-
-  - job_name: 'payment-service'
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['payment-service:8084']
-
-  - job_name: 'notification-service'
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['notification-service:8085']
-
-  - job_name: 'kafka'
-    static_configs:
-      - targets: ['kafka:9308']    # JMX exporter sidecar
+      - targets:
+          - 'auth-service:8081'
+          - 'product-service:8082'
+          - 'order-service:8083'
+          - 'payment-service:8084'
+          - 'notification-service:8085'
 ```
 
----
-
-## 12. Shared Actuator / Metrics Configuration
-
 ```yaml
-# Shared by all services (put in ecommerce-common/src/main/resources/)
+# Each service's application.yml — shared actuator block
 management:
   endpoints:
     web:
@@ -1180,7 +1086,7 @@ management:
       percentiles-histogram:
         http.server.requests: true
       slo:
-        http.server.requests: 50ms, 100ms, 200ms, 500ms
+        http.server.requests: 50ms,100ms,200ms,500ms
   tracing:
     sampling:
       probability: 1.0
@@ -1191,81 +1097,37 @@ management:
 
 ---
 
-## 13. CI/CD Pipeline — GitHub Actions
+## 12. CI/CD Pipeline — GitHub Actions
 
 ```yaml
 # .github/workflows/ci-cd.yml
 name: CI/CD Pipeline
-
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
+  push:       { branches: [main, develop] }
+  pull_request: { branches: [main] }
 
 env:
-  REGISTRY: ghcr.io
+  REGISTRY:   ghcr.io
   IMAGE_BASE: ghcr.io/${{ github.repository_owner }}/ecommerce
 
 jobs:
-  # ── Build & Test ────────────────────────────────────────────────────────────
-  build-and-test:
+  build-test-scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: 'maven'
+        with: { java-version: '21', distribution: 'temurin', cache: 'maven' }
+      - run: ./mvnw -B install -DskipTests
+      - run: ./mvnw -B test
+      - run: ./mvnw -B verify -Pfailsafe
+      - uses: codecov/codecov-action@v4
+        with: { files: '**/target/site/jacoco/jacoco.xml' }
+      - uses: aquasecurity/trivy-action@master
+        with: { scan-type: 'fs', severity: 'CRITICAL,HIGH', ignore-unfixed: true }
 
-      - name: Build all modules
-        run: ./mvnw -B install -DskipTests
-
-      - name: Run unit tests
-        run: ./mvnw -B test
-
-      - name: Run integration tests
-        run: ./mvnw -B verify -Pfailsafe
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: '**/target/surefire-reports/*.xml'
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: '**/target/site/jacoco/jacoco.xml'
-
-  # ── Security Scan ────────────────────────────────────────────────────────────
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: build-and-test
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          ignore-unfixed: true
-          severity: 'CRITICAL,HIGH'
-
-      - name: OWASP Dependency Check
-        uses: dependency-check/Dependency-Check_Action@main
-        with:
-          project: 'ecommerce-platform'
-          path: '.'
-          format: 'HTML'
-
-  # ── Docker Build ─────────────────────────────────────────────────────────────
   docker-build:
     runs-on: ubuntu-latest
-    needs: [build-and-test, security-scan]
+    needs: build-test-scan
     if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
@@ -1273,295 +1135,65 @@ jobs:
                   payment-service, notification-service]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_BASE }}-${{ matrix.service }}
-          tags: |
-            type=sha,prefix=git-
-            type=raw,value=latest
-
-      - name: Build and push
-        uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ matrix.service }}/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.IMAGE_BASE }}-${{ matrix.service }}:${{ github.sha }}
           cache-from: type=gha
           cache-to:   type=gha,mode=max
 
-  # ── Deploy to Staging ─────────────────────────────────────────────────────────
   deploy-staging:
     runs-on: ubuntu-latest
     needs: docker-build
     environment: staging
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: appleboy/ssh-action@v1.0.3
         with:
-          host:     ${{ secrets.STAGING_HOST }}
+          host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
-          key:      ${{ secrets.STAGING_SSH_KEY }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
           script: |
-            cd /opt/ecommerce
-            docker compose pull
+            cd /opt/ecommerce && docker compose pull
             docker compose up -d --remove-orphans
             docker system prune -f
-
-      - name: Health check
-        run: |
-          for service in 8081 8082 8083 8084 8085; do
-            for i in {1..10}; do
-              if curl -sf http://${{ secrets.STAGING_HOST }}:${service}/actuator/health; then
-                echo "Service :${service} healthy"
-                break
-              fi
-              echo "Waiting for :${service}..."
-              sleep 5
-            done
-          done
 ```
 
 ---
 
-## 14. Service Dockerfile Template
+## 14. Security and Performance Checklists
 
-```dockerfile
-# Dockerfile (same pattern for every service; place in each service directory)
-FROM eclipse-temurin:21-jdk-alpine AS builder
-WORKDIR /build
-COPY ../../pom.xml               parent-pom.xml
-COPY ../../ecommerce-common      ecommerce-common/
-COPY ../../ecommerce-bom         ecommerce-bom/
-COPY pom.xml                     .
-COPY src                         src/
-RUN mvn -B -f parent-pom.xml install -DskipTests -am \
-    -pl ecommerce-bom,ecommerce-common
-RUN mvn -B package -DskipTests
+**Security:**
+- HTTPS (TLS 1.3) terminated at NGINX; JWT HS256 with 256-bit secret in Vault/Secrets
+- Refresh tokens rotate on every use; reuse detection revokes the entire token family
+- Passwords: bcrypt strength 12; CORS restricted to known origins
+- Bean Validation on every DTO; parameterised JPQL — no string-concatenated queries
+- Rate limiting via NGINX `limit_req_zone`; Trivy + OWASP DC in CI
+- Actuator on separate management port; `ROLE_` prefix enforced; GDPR erasure endpoint
 
-FROM eclipse-temurin:21-jdk-alpine AS layers
-WORKDIR /layers
-COPY --from=builder /build/target/*.jar app.jar
-RUN java -Djarmode=layertools -jar app.jar extract
-
-FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S spring && adduser -S spring -G spring
-USER spring:spring
-WORKDIR /app
-COPY --from=layers /layers/dependencies/          ./
-COPY --from=layers /layers/spring-boot-loader/    ./
-COPY --from=layers /layers/snapshot-dependencies/ ./
-COPY --from=layers /layers/application/           ./
-EXPOSE 8080
-ENTRYPOINT ["java", \
-  "-XX:+UseVirtualThreads", \
-  "-XX:+UseContainerSupport", \
-  "-XX:MaxRAMPercentage=75", \
-  "org.springframework.boot.loader.launch.JarLauncher"]
-```
+**Performance:**
+- Virtual threads: `spring.threads.virtual.enabled=true`
+- `FetchType.LAZY` everywhere; `default_batch_fetch_size=25`; HikariCP pool = cores × 2 + 1
+- Redis caching for products (5 min TTL); Elasticsearch for catalog reads
+- Outbox poller at 1 s; SLO histogram buckets at p50/p95/p99
 
 ---
 
-## 15. Security Checklist
+## 15. Conclusion — What's Next
 
-- [x] All services use HTTPS (TLS 1.3) terminated at NGINX
-- [x] JWT signed with HS256; secret >= 256 bits; stored in Vault / GitHub Secrets
-- [x] Refresh tokens rotated on every use; reuse triggers full family revocation
-- [x] Passwords hashed with bcrypt (strength 12)
-- [x] CORS restricted to known origins
-- [x] SQL injection: JPA/JPQL with named params; no string concatenation in queries
-- [x] Input validation: Bean Validation on every request DTO
-- [x] Rate limiting: NGINX `limit_req_zone` on `/auth/*`
-- [x] Dependency scanning: OWASP Dependency Check in CI
-- [x] Container scanning: Trivy in CI
-- [x] Secret scanning: GitHub secret scanning enabled on repository
-- [x] Sensitive env vars in Docker secrets / GitHub Secrets — never in code
-- [x] Actuator endpoints restricted to internal network (`management.server.port` ≠ 8080)
-- [x] `ROLE_` prefix enforced; no wildcard authorities
-- [x] GDPR: PII erasure endpoint, data retention job, audit log
+This capstone demonstrates multi-module Maven, the Transactional Outbox Saga, CQRS with
+Elasticsearch, idempotent payments, rotating JWT refresh tokens, and a full observability stack.
 
----
-
-## 16. Performance Optimisation Checklist
-
-- [x] Virtual threads enabled (`spring.threads.virtual.enabled=true` on JDK 21)
-- [x] Hibernate batch inserts (`spring.jpa.properties.hibernate.jdbc.batch_size=50`)
-- [x] `FetchType.LAZY` on all `@ManyToOne` and `@OneToMany` associations
-- [x] `default_batch_fetch_size=25` to avoid N+1 with IN-clause batching
-- [x] Redis caching on product detail and category list (5 min TTL)
-- [x] Elasticsearch for catalog search — PostgreSQL for transactional data
-- [x] Outbox polling interval tuned to 1 s with jitter to avoid thundering herd
-- [x] Connection pools tuned: HikariCP `maximumPoolSize` set to CPU cores × 2 + 1
-- [x] Prometheus SLO buckets defined for p95/p99 latency alerts
-- [x] GraalVM native image builds tested for auth-service (cold-start < 100 ms)
-- [x] Slow query log enabled in PostgreSQL (`log_min_duration_statement = 200ms`)
-
----
-
-## 17. Grafana Dashboard Excerpt
-
-```json
-{
-  "title": "Ecommerce Platform Overview",
-  "panels": [
-    {
-      "title": "Order Rate (per minute)",
-      "type": "graph",
-      "targets": [
-        { "expr": "rate(http_server_requests_seconds_count{uri='/api/v1/orders',method='POST'}[1m]) * 60",
-          "legendFormat": "orders/min" }
-      ]
-    },
-    {
-      "title": "p95 Request Latency",
-      "type": "graph",
-      "targets": [
-        { "expr": "histogram_quantile(0.95, rate(http_server_requests_seconds_bucket[5m]))",
-          "legendFormat": "{{service}} p95" }
-      ]
-    },
-    {
-      "title": "Payment Success Rate",
-      "type": "singlestat",
-      "targets": [
-        { "expr": "rate(payment_succeeded_total[5m]) / rate(payment_attempted_total[5m]) * 100" }
-      ]
-    },
-    {
-      "title": "Kafka Consumer Lag",
-      "type": "graph",
-      "targets": [
-        { "expr": "kafka_consumer_fetch_manager_records_lag{topic=~'order.*'}",
-          "legendFormat": "{{topic}}" }
-      ]
-    },
-    {
-      "title": "JVM Heap Usage",
-      "type": "graph",
-      "targets": [
-        { "expr": "jvm_memory_used_bytes{area='heap'}",
-          "legendFormat": "{{service}}" }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 18. Integration Test Skeleton (Testcontainers)
-
-```java
-// order-service/src/test/java/com/example/order/OrderServiceIntegrationTest.java
-package com.example.order;
-
-import com.example.order.dto.CreateOrderRequest;
-import com.example.order.dto.OrderDto;
-import com.example.order.service.OrderService;
-import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.KafkaContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
-
-import java.math.BigDecimal;
-
-import static org.assertj.core.api.Assertions.assertThat;
-
-@SpringBootTest
-@Testcontainers
-class OrderServiceIntegrationTest {
-
-    @Container
-    static PostgreSQLContainer<?> postgres =
-            new PostgreSQLContainer<>("postgres:16-alpine")
-                    .withDatabaseName("ordersdb")
-                    .withUsername("orders")
-                    .withPassword("orders");
-
-    @Container
-    static KafkaContainer kafka =
-            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"));
-
-    @DynamicPropertySource
-    static void configure(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url",      postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
-        registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
-    }
-
-    @Autowired
-    OrderService orderService;
-
-    @Test
-    void createOrderSavesAndPublishesOutboxEvent() {
-        CreateOrderRequest req = new CreateOrderRequest(
-                "idem-key-001", new BigDecimal("149.99"), null);
-
-        OrderDto result = orderService.createOrder(req, 42L);
-
-        assertThat(result.status()).isEqualTo("PENDING_PAYMENT");
-        assertThat(result.totalAmount()).isEqualByComparingTo("149.99");
-    }
-
-    @Test
-    void createOrderIsIdempotent() {
-        CreateOrderRequest req = new CreateOrderRequest(
-                "idem-key-002", new BigDecimal("29.99"), null);
-
-        OrderDto first  = orderService.createOrder(req, 1L);
-        OrderDto second = orderService.createOrder(req, 1L);
-
-        assertThat(first.id()).isEqualTo(second.id());
-    }
-}
-```
-
----
-
-## 19. Conclusion — What's Next for World-Class Java Developers
-
-You have built a production-ready, cloud-native e-commerce platform that demonstrates:
-
-**Architecture patterns mastered:**
-- Multi-module Maven build with BOM
-- Saga pattern via Transactional Outbox (guaranteed exactly-once delivery)
-- CQRS: PostgreSQL for writes, Elasticsearch for reads
-- Idempotency keys for safe payment retries
-
-**Security fundamentals embedded:**
-- JWT + rotating refresh tokens with reuse detection
-- Method-level security with SpEL and custom permission evaluators
-- GDPR-ready audit trail and erasure service
-
-**Operational readiness:**
-- Full observability stack (Prometheus, Grafana, Zipkin)
-- Layered Docker images for fast CI rebuilds
-- GitHub Actions pipeline: build → test → scan → Docker push → rolling deploy
-- Virtual threads for high-throughput I/O without thread-per-request overhead
-
-**Paths to go further:**
-1. **Kubernetes** — convert `docker-compose.yml` to Helm charts; add HPA, PodDisruptionBudgets
-2. **gRPC** — replace internal REST calls between services with typed Protobuf contracts
-3. **Event sourcing** — extend the outbox into a full event store with projections for analytics
-4. **GraalVM native** — build and benchmark native images of the auth and notification services
-5. **Service mesh** — add Istio or Linkerd for mutual TLS, traffic shaping, and circuit breaking
-6. **SRE practices** — define SLOs, error budgets, and runbooks for each service
+**Next steps for world-class Java developers:**
+1. **Kubernetes** — Helm charts, HPA, PodDisruptionBudgets, Ingress with cert-manager
+2. **gRPC** — replace inter-service REST with typed Protobuf contracts
+3. **Event sourcing** — extend the outbox into a full event store with CQRS projections
+4. **GraalVM native** — benchmark `auth-service` native image (cold-start < 100 ms)
+5. **Service mesh** — Istio mTLS, traffic splitting, canary deployments
+6. **SRE** — error budgets, SLO burn-rate alerts, runbooks in Confluence
